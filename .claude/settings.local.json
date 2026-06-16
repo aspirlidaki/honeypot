@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 cluster_attackers.py)",
-      "Bash(curl --version)",
-      "Bash(sudo -n true)"
-    ]
-  }
-}
