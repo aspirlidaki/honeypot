@@ -1,18 +1,16 @@
 """
-
   HONEYPOT ATTACKER CLUSTERING  -  Botnet Discovery via Graph Analysis
-  VERSION 3 - Cosine Similarity Edges + Leiden Community Detection
-
+  VERSION 3 - Cosine Similarity Edges & Leiden Community Detection
 
 GOAL
 Find groups of attacker IP addresses that are likely part of the same botnet,
-based on the (username, password) pairs they try on our SSH honeypot.
+based on the (username, password) pairs they try on the SSH honeypot.
 
 THE CORE IDEA
 Bots in the same botnet all run the same attack software with the same
 credential list. This means they try the same (username, password) pairs.
 
-If two IPs try the same pairs -> they are probably the same botnet.
+If two IPs try the same pairs ,they are probably the same botnet.
 The more rare pairs they share, the more certain we are.
 
 We model this as a graph:
@@ -49,6 +47,7 @@ PIPELINE
 8  Save results to CSV
 
 """
+import argparse                      # CLI argument parsing
 import csv                          # reading the input CSV file
 import math                         # math.log() for IDF calculation
 import collections                  # defaultdict and Counter
@@ -67,7 +66,7 @@ import matplotlib.cm as cm
 # CONFIGURATION
 # ---------------------------------------------------------------------------
 
-DATA_FILE = "cowrie_ip_username_pass_anon.csv"
+DATA_FILE = "cowrie_ip_username_pass_anon.csv"   # default; overridden by --input
 
 # Minimum cosine similarity to form an edge.
 # 0.0 = completely different credential sets, 1.0 = identical sets.
@@ -87,11 +86,18 @@ def load_data(filepath):
     """
     Read the CSV file and return a list of (ip, username, password) triples.
     Each row represents one login attempt by one attacker.
-    The IP addresses are already anonymised (e.g. IP_42, IP_100).
+    Required columns: ip, username, password.
     """
+    REQUIRED = {"ip", "username", "password"}
     records = []
     with open(filepath, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
+        missing = REQUIRED - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"CSV is missing required column(s): {', '.join(sorted(missing))}. "
+                f"Found: {reader.fieldnames}"
+            )
         for row in reader:
             records.append((
                 row["ip"].strip(),
@@ -156,15 +162,10 @@ def compute_idf(pair_to_ips, total_ips):
             df = number of IPs that tried this specific pair (document frequency)
 
     What the values mean:
-        High IDF (close to 8.5) = very rare pair, tried by almost nobody
+        High IDF = very rare pair, tried by almost nobody
             -> sharing this pair is strong evidence of being the same botnet
-        Low IDF (close to 0.5)  = very common pair, tried by thousands of IPs
+        Low IDF  = very common pair, tried by many IPs
             -> sharing this pair tells us almost nothing useful
-
-    Examples from this dataset:
-        345gs5662d34 / 345gs5662d34  -> used by 2791 IPs -> IDF = 0.578  (useless)
-        admin / admin                -> used by  452 IPs -> IDF = 2.398  (moderate)
-        perl / warning               -> used by    7 IPs -> IDF = 6.563  (very useful)
     """
     idf = {}
     N = total_ips
@@ -531,6 +532,17 @@ def save_results(clusters, output_file):
 #MAIN FUNCTION
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Cluster SSH honeypot attackers by credential similarity."
+    )
+    parser.add_argument(
+        "--input", "-i",
+        default=DATA_FILE,
+        help=f"Path to the input CSV file (default: {DATA_FILE}). "
+             "Must have columns: ip, username, password."
+    )
+    args = parser.parse_args()
+
     print("=" * 65)
     print("  HONEYPOT ATTACKER CLUSTERING  -  VERSION 3")
     print("  Cosine Similarity Graph + Leiden Community Detection")
@@ -538,7 +550,7 @@ def main():
     print()
 
     # Load the raw honeypot data
-    records = load_data(DATA_FILE)
+    records = load_data(args.input)
 
     # Build pair->IPs and IP->pairs mappings
     pair_to_ips, ip_to_pairs, all_ips = build_mappings(records)
