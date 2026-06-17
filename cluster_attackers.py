@@ -196,15 +196,36 @@ def build_graph(ip_to_pairs, all_ips, idf):
     is compared on the same scale as one that tried 50 — only the PATTERN of
     credentials matters, not the volume.
 
-    Implementation uses scipy.sparse matrix multiplication:
-        M      = IP × credential matrix  (values = IDF scores)
-        M_norm = M with every row divided by its L2 norm
-        S      = M_norm @ M_norm.T  →  all pairwise cosine similarities
+    Plain-English walkthrough of the sparse matrix approach:
 
-    This replaces the O(Σ k²) itertools.combinations loop from V2.
-    For the canary pair alone (k = 2,791 IPs), the old loop generated
-    ~3.9 million iterations; the sparse multiply handles the whole dataset
-    in one vectorised call.
+        Step A — build a spreadsheet (matrix M):
+            Rows    = attacker IPs  (one row per IP)
+            Columns = credential pairs  (one column per unique pair)
+            Cell    = IDF score of that pair, or 0 if the IP never tried it
+            Most cells are 0 (each IP tries only a tiny fraction of all pairs),
+            so we store it as a "sparse" matrix — only the non-zero cells.
+
+        Step B — normalise each row (divide by its length):
+            Without this, an IP that tried 10,000 pairs would always look more
+            similar to everything than one that tried 50, just due to volume.
+            Dividing each row by its L2 norm (its "length" in vector space)
+            puts every IP on the same scale — only the PATTERN matters.
+
+        Step C — multiply M_norm by its own transpose (M_norm.T):
+            The result S[i][j] is the dot product of IP i's row and IP j's row.
+            Because both rows are normalised, this dot product equals the cosine
+            similarity — a number between 0 (nothing in common) and 1 (identical
+            credential sets).  One matrix multiply gives us ALL pairs at once.
+
+        Step D — keep only the upper triangle (avoid duplicate pairs):
+            S[i][j] and S[j][i] are the same similarity. triu(k=1) keeps only
+            the cells above the diagonal, so each pair is processed once.
+
+    Why not just loop over every pair of IPs?
+        With ~5,000 IPs that would be 12.5 million comparisons.  The one common
+        pair (345gs5662d34) alone appears in 2,791 IPs — looping over those
+        would generate ~3.9 million iterations by itself.  The matrix multiply
+        handles the entire dataset in one vectorised call.
 
     Only edges with cosine similarity >= MIN_COSINE_SIM are kept.
     """
@@ -212,7 +233,7 @@ def build_graph(ip_to_pairs, all_ips, idf):
     all_pairs = list(idf.keys())
     pair_idx  = {pair: j for j, pair in enumerate(all_pairs)}
 
-    # Build COO-format entries for the sparse IP × credential matrix
+    # Step A: fill in the IP × credential spreadsheet (sparse, only non-zero cells)
     rows, cols, vals = [], [], []
     for ip, pair_set in ip_to_pairs.items():
         i = ip_idx[ip]
@@ -227,12 +248,12 @@ def build_graph(ip_to_pairs, all_ips, idf):
         dtype=np.float32,
     )
 
-    # L2-normalise each row so that  M_norm @ M_norm.T[i,j] = cosine_sim(i, j)
+    # Step B: normalise each row by its L2 norm (vector length)
     norms = np.asarray(M.power(2).sum(axis=1)).flatten() ** 0.5
     norms[norms == 0] = 1.0                      # keep isolated IPs stable
     M_norm = sp.diags(1.0 / norms) @ M
 
-    # Compute upper-triangle cosine similarities (k=1 skips the diagonal)
+    # Steps C & D: multiply to get all cosine similarities, upper triangle only
     S = sp.triu(M_norm @ M_norm.T, k=1).tocoo()
 
     G = nx.Graph()
@@ -485,7 +506,7 @@ def save_results(clusters, output_file):
 
     Columns:
         ip                   : the anonymised attacker IP address
-        community_id         : the cluster ID assigned by Louvain
+        community_id         : the cluster ID assigned by Leiden
         cluster_size         : total number of IPs in this cluster
         signature_credential : the most discriminating credential for this cluster
                                (highest IDF-sum pair), formatted as username/password
