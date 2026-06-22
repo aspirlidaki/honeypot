@@ -36,10 +36,11 @@ Two IPs that share many credential pairs are likely part of the same botnet. The
 | 1 | Load CSV → list of `(ip, username, password)` triples |
 | 2 | Build `pair → IPs` and `IP → pairs` mappings (sets, so retries don't inflate counts) |
 | 3 | Compute IDF per credential pair: `IDF = log(N / df)` |
-| 4 | Build weighted graph: edge weight = sum of IDF scores of shared pairs, threshold ≥ 1.0 |
-| 5 | Run Louvain community detection (`resolution=1.0`, `randomize=False`) |
-| 6 | Extract signature credential per cluster (highest IDF-sum pair) |
-| 7 | Visualise and export |
+| 4 | Build TF-IDF vectors per IP and compute cosine similarity via sparse matrix multiply |
+| 5 | Add edge between two IPs if cosine similarity >= 0.10 |
+| 6 | Run Leiden community detection (`resolution=1.0`, `seed=42`) |
+| 7 | Extract signature credential per cluster (highest IDF-sum pair) |
+| 8 | Visualise and export |
 
 ### IDF Weighting
 
@@ -64,7 +65,7 @@ df = number of IPs that tried this pair
 | `eth/ethereum12345` | 3 | 7.413 | Very high |
 | Any pair used by exactly 1 IP | 1 | 8.512 | Maximum |
 
-`MIN_EDGE_WEIGHT = 1.0`: the canary pair (IDF = 0.578) cannot form an edge alone, preventing the 9 canary sub-clusters from being artificially merged.
+`MIN_COSINE_SIM = 0.10`: two IPs need at least roughly 10% normalised credential overlap to form an edge. Because cosine similarity is normalised by vector length, this threshold is stable regardless of how many credentials an IP tried.
 
 ### Why Not Version 1
 
@@ -86,17 +87,19 @@ No stable threshold exists — IDF weighting is the correct fix.
 
 ## 3. Results
 
-### V1 vs V2
+### Version Comparison
 
-| Metric | V1 | V2 |
-|---|---|---|
-| Edge weighting | Raw count | IDF sum |
-| Largest cluster | 1,974 IPs | **856 IPs** |
-| Clusters ≥ 10 IPs | 6 | **13** |
-| Clusters ≥ 2 IPs | 21 | **29** |
-| Artificial mega-clusters | 3 | **0** |
-| Singletons | 159 | 159 |
-| Total communities | 179 | **188** |
+| Metric | V1 | V2 | V3 |
+|---|---|---|---|
+| Edge weighting | Raw count | IDF sum | Cosine similarity |
+| Community algorithm | Louvain | Louvain | Leiden |
+| Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 |
+| Largest cluster | 1,974 IPs | 856 IPs | (run script) |
+| Clusters >= 10 IPs | 6 | 13 | (run script) |
+| Clusters >= 2 IPs | 21 | 29 | (run script) |
+| Artificial mega-clusters | 3 | 0 | (run script) |
+| Singletons | 159 | 159 | (run script) |
+| Total communities | 179 | 188 | (run script) |
 
 ### Cluster Distribution
 
@@ -233,9 +236,7 @@ Monero dominates: CPU-efficient RandomX mining and untraceable transactions make
 
 ## 7. Next Steps
 
-- **V3 — Cosine similarity edges:** represent each IP as a TF-IDF vector; use cosine similarity as edge weight. Normalises for credential list size — a high-volume bot that tried 10,000 pairs won't appear artificially similar to everyone.
-- **Leiden algorithm:** replace Louvain. Leiden guarantees internally connected communities and finds more fine-grained structure.
-- **GeoIP enrichment:** map sub-clusters geographically — are the 9 canary sub-clusters from distinct regions?
+- **GeoIP enrichment:** map sub-clusters geographically — are the canary sub-clusters from distinct regions?
 - **Timestamp analysis:** if available, correlate attack timing across clusters.
 - **Multi-honeypot correlation:** combining logs from multiple sensors dramatically improves cluster resolution.
 
