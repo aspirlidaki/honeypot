@@ -1,5 +1,5 @@
 # Honeypot Attacker Clustering — Technical Report
-Version 3 — Cosine Similarity Graph + Leiden Community Detection
+Version 4 — TF-IDF with Stopword Removal + Leiden Community Detection
 
 | | |
 |---|---|
@@ -35,12 +35,13 @@ Two IPs that share many credential pairs are likely part of the same botnet. The
 |---|---|
 | 1 | Load CSV → list of `(ip, username, password)` triples |
 | 2 | Build `pair → IPs` and `IP → pairs` mappings (sets, so retries don't inflate counts) |
-| 3 | Compute IDF per credential pair: `IDF = log(N / df)` |
-| 4 | Build TF-IDF vectors per IP and compute cosine similarity via sparse matrix multiply |
-| 5 | Add edge between two IPs if cosine similarity >= 0.10 |
-| 6 | Run Leiden community detection (`resolution=1.0`, `seed=42`) |
-| 7 | Extract signature credential per cluster (highest IDF-sum pair) |
-| 8 | Visualise and export |
+| 3 | Filter vocabulary: drop credentials used by >10% of all IPs (stopwords) or by exactly 1 IP (singletons) |
+| 4 | Compute IDF per surviving credential pair: `IDF = log(N / df)` |
+| 5 | Build sparse TF-IDF matrix over kept pairs; L2-normalise rows; compute cosine similarities |
+| 6 | Add edge between two IPs if cosine similarity >= 0.10 |
+| 7 | Run Leiden community detection (plain modularity, `seed=42`) |
+| 8 | Extract signature credential per cluster (most-shared kept pair, IDF tiebreak) |
+| 9 | Visualise and export |
 
 ### IDF Weighting
 
@@ -67,6 +68,13 @@ df = number of IPs that tried this pair
 
 `MIN_COSINE_SIM = 0.10`: two IPs need at least roughly 10% normalised credential overlap to form an edge. Because cosine similarity is normalised by vector length, this threshold is stable regardless of how many credentials an IP tried.
 
+**V4 vocabulary filter.** Before IDF is computed, two classes of credential are removed:
+
+- **Stopwords** (`df > 0.10 × N = 497`): `345gs5662d34/345gs5662d34` (df=2,791) and `root/3245gs5662d34` (df=1,658) are both dropped. These rows in the table above are stopwords in V4.
+- **Singletons** (`df < 2`): credentials only one IP ever tried are also dropped.
+
+After filtering, the minimum IDF in the retained vocabulary rises to approximately 2.3 (credentials at the 10% cutoff), eliminating the near-zero-IDF stopwords from all similarity calculations.
+
 ### Why Not Version 1
 
 V1 used raw shared-pair count as edge weight. The credential `345gs5662d34/345gs5662d34` (used by 56% of IPs) connected over half the graph with equal weight to genuinely rare pairs, producing three artificial mega-clusters of 1,974 / 1,294 / 1,282 IPs.
@@ -89,17 +97,18 @@ No stable threshold exists — IDF weighting is the correct fix.
 
 ### Version Comparison
 
-| Metric | V1 | V2 | V3 |
-|---|---|---|---|
-| Edge weighting | Raw count | IDF sum | Cosine similarity |
-| Community algorithm | Louvain | Louvain | Leiden |
-| Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 |
-| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs |
-| Clusters >= 10 IPs | 6 | 13 | 9 |
-| Clusters >= 2 IPs | 21 | 29 | 31 |
-| Artificial mega-clusters | 3 | 0 | 0 |
-| Singletons | 159 | 159 | 224 |
-| Total communities | 179 | 188 | 255 |
+| Metric | V1 | V2 | V3 | V4 |
+|---|---|---|---|---|
+| Edge weighting | Raw count | IDF sum | Cosine similarity | Cosine similarity |
+| Vocabulary filter | None | None | None | Stopwords + singletons removed |
+| Community algorithm | Louvain | Louvain | Leiden | Leiden (plain modularity) |
+| Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 | cosine sim >= 0.10 |
+| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs | TBD (expected: low hundreds) |
+| Clusters >= 10 IPs | 6 | 13 | 9 | TBD |
+| Clusters >= 2 IPs | 21 | 29 | 31 | TBD |
+| Artificial mega-clusters | 3 | 0 | 0 | 0 (canary filtered from vocabulary) |
+| Singletons | 159 | 159 | 224 | TBD (expected: higher than V3) |
+| Total communities | 179 | 188 | 255 | TBD |
 
 ### Cluster Distribution
 
@@ -233,6 +242,63 @@ Crypto-miner usernames (`xmr`, `bitcoin`, `eth`, `wallet`) and miscellaneous pai
 ---
 
 ## 9. Algorithm Deep Dive
+
+### 9.0 Vocabulary Filtering: Stopword Removal (V4)
+
+#### The problem: why IDF down-weighting is not enough
+
+The original IDF formula assigns the canary credential (`345gs5662d34/345gs5662d34`, used by 2,791 IPs) a score of 0.578. This is much lower than rarer credentials, but it does not eliminate the canary's effect on cosine similarity.
+
+Cosine similarity between IPs $a$ and $b$ after L2 normalisation is:
+
+$$\cos(\hat{\mathbf{v}}_a, \hat{\mathbf{v}}_b) = \hat{\mathbf{v}}_a \cdot \hat{\mathbf{v}}_b$$
+
+where $\hat{\mathbf{v}}_i = \mathbf{v}_i / \|\mathbf{v}_i\|$. The canary contributes $\text{IDF}(\text{canary}) = 0.578$ to dimension $p_\text{canary}$ of the raw vector, and $0.578^2 = 0.334$ to the squared norm $\|\mathbf{v}_i\|^2$. After normalisation, the canary dimension gets re-weighted relative to the other dimensions:
+
+$$\hat{v}_i[p_\text{canary}] = \frac{0.578}{\|\mathbf{v}_i\|}$$
+
+For an IP whose credential profile is dominated by the canary, $\|\mathbf{v}_i\|$ is small and $\hat{v}_i[p_\text{canary}]$ is close to 1 — the L2 normalisation re-inflates the canary's influence. Two IPs that mostly used the canary credential end up with cosine similarity near 1 regardless of their other credentials.
+
+The only complete fix is to remove the canary dimension from the vector space. With no canary dimension, no cosine similarity between any pair of IPs can include a canary contribution.
+
+#### The vocabulary filter
+
+Two thresholds are applied before IDF is computed:
+
+$$\text{keep pair } p \iff \text{MIN\_DF} \leq df_p \leq \lfloor\text{MAX\_DF\_FRACTION} \times N\rfloor$$
+
+With $N = 4{,}973$, `MAX_DF_FRACTION = 0.10`, `MIN_DF = 2`:
+
+| Threshold | Value | Drops |
+|---|---|---|
+| Upper bound | $df_p \leq 497$ | Credentials used by >10% of IPs (stopwords) |
+| Lower bound | $df_p \geq 2$ | Credentials only one IP ever tried (singletons) |
+
+**Stopwords** ($df_p > 497$) are credentials so common across the dataset that sharing them carries no discriminating signal. In information retrieval, words like "the" or "and" that appear in every document are removed from the index for exactly this reason. Here, `345gs5662d34/345gs5662d34` (df=2,791) and `root/3245gs5662d34` (df=1,658) are the primary stopwords.
+
+**Singletons** ($df_p = 1$) appear in exactly one IP's vector. Their inner product with any other IP's vector is necessarily zero — they cannot contribute to any edge. They inflate the L2 norm of the single IP that tried them, weakening that IP's cosine similarity with its genuine botnet peers. Removing them makes the remaining vector directions more informative.
+
+#### IDF after filtering
+
+IDF is computed only on the surviving pairs:
+
+$$\text{IDF}(p) = \log\!\left(\frac{N}{df_p}\right), \quad 2 \leq df_p \leq 497$$
+
+The minimum IDF in the filtered vocabulary is $\log(4973/497) \approx 2.30$. Every retained credential is at least moderately discriminating — the near-zero-IDF stopwords have been removed entirely. The maximum IDF is unchanged at $\log(4973/2) \approx 7.82$ for credentials used by exactly two IPs.
+
+#### Effect on IPs with fully-filtered credential sets
+
+An IP whose entire credential set consists of stopwords and singletons ends up with an all-zero TF-IDF vector. The safe division:
+
+$$\text{inv}_i = \begin{cases} 1/\|\mathbf{v}_i\| & \text{if } \|\mathbf{v}_i\| > 0 \\ 0 & \text{otherwise} \end{cases}$$
+
+gives this IP a zero normalised row. Its cosine with every other IP is 0, no edges are formed, and it becomes a singleton community. This is correct: an IP whose only activity was using universal credentials provides no evidence of botnet membership with any specific group.
+
+#### Why this is the textbook approach
+
+Stopword removal is a foundational technique in information retrieval, described in Manning, Raghavan & Schütze (2008) and applied identically in search engines. The analogy is exact: credential pairs are terms, attacker IPs are documents, botnets are document clusters. Terms appearing in the majority of documents are removed from the index before similarity is computed because their high frequency in the index makes them noise rather than signal. V4 applies this standard technique to credential clustering.
+
+---
 
 ### 9.1 IDF: Measuring Credential Rarity
 
@@ -378,3 +444,23 @@ The three phases repeat until the partition is stable. Because Phase 1 processes
 | Graph construction | `itertools.combinations`, O(k²) per pair | Sparse matrix multiply, one vectorised call |
 | Community algorithm | Louvain — disconnected communities possible | Leiden — connectivity guaranteed by refinement |
 | Threshold | Raw IDF sum ≥ 1.0 | Cosine similarity ≥ 0.10 |
+
+---
+
+### 9.8 V3 vs V4 Summary
+
+The key change from V3 to V4 is vocabulary filtering. Everything else — cosine similarity, sparse matrix computation, Leiden with plain modularity — is identical.
+
+| Aspect | V3 | V4 |
+|---|---|---|
+| Vocabulary | All 40,474 credential pairs | Pairs with $2 \leq df \leq 497$ only |
+| Stopwords | Retained (IDF=0.578, partial influence via norm) | Removed — zero dimensions in all vectors |
+| Singletons | Retained (inflate norms, no edge contribution) | Removed |
+| IDF minimum | 0.578 (canary pair) | ~2.30 (pairs at 10% cutoff) |
+| Canary effect | Cosine partially re-inflated after L2 normalisation | Zero — canary has no dimension in any vector |
+| IPs with all-zero rows | Cannot occur (every IP tried something) | Possible (IPs whose credentials are all stopwords or singletons) |
+| Zero-row handling | Divide-by-one fallback | Safe divide: inv=0 keeps row zero |
+| Leiden partition | `RBConfigurationVertexPartition`, resolution=1.0 | `ModularityVertexPartition`, no resolution parameter |
+| Signature credential | Highest IDF-sum pair across all vocabulary | Most-shared pair in kept vocabulary, IDF tiebreak |
+
+**Why the Leiden variant changed.** V3 used `RBConfigurationVertexPartition` (the resolution-parameter variant of modularity). V4 uses `ModularityVertexPartition` (plain modularity, $\gamma = 1$). Both maximise the same objective at $\gamma = 1$; the change makes the algorithm choice explicit and removes the resolution parameter as a variable that could mask or amplify the stopword-removal effect.

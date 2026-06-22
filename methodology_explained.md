@@ -244,6 +244,88 @@ The V2 canary sub-clusters merged into one community of 3,329 IPs. At `MIN_COSIN
 
 ---
 
+## Part 5.5 — What Changed in V4
+
+### The remaining problem after V3
+
+V3 produced a 3,329-IP cluster whose signature was `root/3245gs5662d34`. The root cause was that `345gs5662d34/345gs5662d34` (used by 56% of all IPs) and `root/3245gs5662d34` (used by 33%) were still present in the credential vocabulary. Even with an IDF score of only 0.578, these credentials were still dimensions in every vector they appeared in.
+
+**The subtle failure:** L2 normalisation re-inflates near-universal credentials.
+
+When you L2-normalise a vector, you divide every dimension by the vector's total length. For an IP that tried mostly the canary credential, the canary dimension is a large fraction of the total length. Dividing by that length doesn't shrink the canary dimension to zero — it rescales it relative to the other dimensions. The result: after normalisation, two IPs that both heavily used the canary credential look similar to each other even if their rare credentials are completely different.
+
+**The simple proof:**
+
+Imagine two IPs with vectors (in a 2-pair vocabulary: canary=0.578, rare=6.563):
+```
+IP_A: [0.578, 0.000]  → normalised: [1.000, 0.000]
+IP_B: [0.578, 6.563]  → normalised: [0.088, 0.996]
+```
+
+cos(A, B) = 1.000 × 0.088 + 0.000 × 0.996 = **0.088**
+
+IP_A tried only the canary. IP_B tried the canary plus a rare pair. Their cosine is 0.088 — just below the 0.10 threshold, but only barely. Add a few more pairs that both share (even common ones), and they connect.
+
+Now remove the canary from the vocabulary:
+```
+IP_A: [0.000]  → all-zero row → no edges (becomes singleton)
+IP_B: [6.563]  → normalised: [1.000]
+```
+
+IP_A links to nobody. IP_B only links to other IPs that also tried the rare pair. This is the correct outcome.
+
+### The V4 fix: treat near-universal credentials as stopwords
+
+**Stopword** is information retrieval's term for a word so common it is removed from the search index entirely: "the", "and", "is". V4 applies the same logic to credentials.
+
+Any credential used by more than **10% of all IPs** is a stopword. The threshold is:
+
+```
+MAX_DF_FRACTION = 0.10
+max_df = 0.10 × 4,973 = 497 IPs
+
+Dropped as stopwords:
+  345gs5662d34/345gs5662d34  (2,791 IPs = 56%)  ← main canary
+  root/3245gs5662d34          (1,658 IPs = 33%)  ← secondary canary
+```
+
+V4 also drops **singleton** credentials — those only one IP ever tried. They cannot link any pair of IPs (they appear in exactly one vector), and they inflate that IP's vector norm without helping similarity calculations.
+
+### The three-filter pipeline
+
+```
+For each credential pair p with document frequency df:
+
+  df > 0.10 × N   →  stopword, DROP
+  df < 2           →  singleton, DROP
+  2 ≤ df ≤ 497    →  KEEP, compute IDF = log(N / df)
+```
+
+After filtering, IDF is computed only on the surviving pairs. The minimum IDF in the retained vocabulary rises from 0.578 (canary, V3) to approximately **2.30** (credentials at the 10% cutoff). Every pair in the new vocabulary is at least moderately discriminating.
+
+### What happens to IPs whose credentials are all filtered
+
+Some IPs tried only stopwords and/or singleton credentials. After filtering, their TF-IDF vectors are all zeros. The normalization step handles this explicitly:
+
+```python
+inv = np.divide(1.0, norms, out=np.zeros_like(norms), where=norms > 0)
+```
+
+Zero-norm rows get `inv = 0`, so they stay all-zero after normalisation. Their cosine with every other IP is 0. They form no edges and become singleton communities. This is correct — an IP that only tried universal credentials gives us no evidence about which botnet it belongs to.
+
+### V3 → V4 pipeline diff
+
+| Step | V3 | V4 |
+|---|---|---|
+| Vocabulary | All 40,474 pairs | Pairs with 2 ≤ df ≤ 497 |
+| IDF computed for | Every pair | Surviving pairs only |
+| IDF minimum | 0.578 (canary) | ~2.30 (10% cutoff) |
+| Zero-vector IPs | Cannot occur | Possible; become singletons |
+| Leiden variant | RBConfigurationVertexPartition (resolution=1.0) | ModularityVertexPartition (plain modularity) |
+| Signature method | Highest IDF-sum pair | Most-shared kept pair, IDF tiebreak |
+
+---
+
 ## Part 6 — What Good Results Would Look Like
 
 **Signs of a real botnet cluster:**
@@ -294,6 +376,16 @@ V2 --- TF-IDF edge weights ------> Better separation (13 clusters >= 10 IPs)
 V3 --- Cosine similarity + Leiden -> Volume bias eliminated
        MIN_COSINE_SIM = 0.10         Guaranteed well-connected communities
        (normalised by L2 norm)       255 communities, largest: 3,329 IPs
+         |
+         | Problem found:
+         | L2 normalisation re-inflates near-universal credentials
+         | Canary (56% of IPs) still glues unrelated IPs together
+         v
+V4 --- Vocabulary filtering -------> Canary credential absent from all vectors
+       MAX_DF_FRACTION = 0.10         No stopword can form or strengthen any edge
+       MIN_DF = 2                     Expected: largest cluster in low hundreds
+       (stopwords + singletons        Singleton count expected to rise (canary
+        removed before IDF)            was previously gluing unrelated IPs)
 ```
 
 ---
@@ -413,4 +505,84 @@ Leiden (Traag et al., 2019) inserts a **refinement phase** after each aggregatio
 | 6 | Analyse clusters (signature, size, top credentials) | Same |
 | 7 | Visualise + save graph | Same |
 | 8 | Export CSV | Same |
+
+---
+
+## Part 8 — Version 4: The Full Mathematics
+
+### The core problem: L2 normalisation partially re-inflates stopwords
+
+V3's cosine similarity approach was correct, but it did not fully neutralise near-universal credentials. To see why, expand the cosine formula for an IP $a$ that tried only the canary pair $c$:
+
+$$\mathbf{v}_a = [\underbrace{0.578}_{c}, 0, 0, \ldots]$$
+
+$$\|\mathbf{v}_a\| = 0.578, \qquad \hat{\mathbf{v}}_a = [1.0, 0, 0, \ldots]$$
+
+The canary dimension, after normalisation, becomes 1.0 for this IP — its maximum possible value. Now consider IP $b$ that tried the canary plus a rare pair $r$ (IDF = 6.563):
+
+$$\mathbf{v}_b = [0.578, 6.563, 0, \ldots]$$
+
+$$\|\mathbf{v}_b\| = \sqrt{0.578^2 + 6.563^2} = \sqrt{0.334 + 43.07} = \sqrt{43.40} = 6.588$$
+
+$$\hat{\mathbf{v}}_b = \left[\frac{0.578}{6.588}, \frac{6.563}{6.588}, 0, \ldots\right] = [0.088, 0.996, 0, \ldots]$$
+
+$$\cos(\hat{\mathbf{v}}_a, \hat{\mathbf{v}}_b) = 1.0 \times 0.088 + 0 \times 0.996 = 0.088$$
+
+This is just below the 0.10 threshold. But if $a$ and $b$ share any additional common credential (say `admin/admin`, IDF=2.398), the similarity rises above 0.10 and an edge forms — even though IP $a$ is essentially characterised only by the canary. This is the mechanism that created the 3,329-IP canary cluster in V3.
+
+### The vocabulary filter: a change of basis
+
+Filtering stopwords from the vocabulary is equivalent to projecting all vectors onto a lower-dimensional subspace that excludes the stopword dimensions. If $\mathcal{P}$ is the set of kept pairs and $\mathcal{S}$ is the set of stopwords + singletons:
+
+$$\mathbf{v}_i^{(V4)}[p] = \begin{cases} \text{IDF}(p) & p \in \mathcal{P} \text{ and IP}_i \text{ tried } p \\ 0 & \text{otherwise} \end{cases}$$
+
+For $p \in \mathcal{S}$: no dimension exists in $\mathbf{v}_i^{(V4)}$. The matrix $M^{(V4)} \in \mathbb{R}^{N \times |\mathcal{P}|}$ has $|\mathcal{P}| < 40{,}474$ columns — only the kept credential pairs. The canary pair and secondary canary are absent from every row.
+
+### Why the threshold choice is principled
+
+The 10% threshold (`MAX_DF_FRACTION = 0.10`) is not arbitrary. Credentials above this threshold have IDF $< \log(1/0.10) = \log(10) \approx 2.303$. This means two IPs whose only shared credential is at the cutoff have:
+
+$$\mathbf{v}_a \cdot \mathbf{v}_b = 2.303^2 = 5.30 \text{ in the numerator}$$
+
+After L2 normalisation, the cosine depends on how many other credentials each IP tried. An IP that tried only this one credential would have $\hat{v}[p] = 1.0$ and the cosine would equal $\hat{v}_b[p]$, which is at most 1.0. But in practice, any IP with a rich credential set (many pairs) has $\hat{v}[p]$ much smaller, and a 10%-frequency credential is insufficient to form an edge on its own.
+
+The 10% cutoff is also the standard "stopword" threshold in many IR systems (Van Rijsbergen, 1979; Salton & McGill, 1983). Credentials at 5-10% frequency are borderline — they appear frequently enough to create accidental connections but not frequently enough to be meaningless. Erring on the side of filtering them out is conservative and avoids false positives.
+
+### The signature credential: count-then-IDF
+
+V3's signature was the credential pair with the highest sum of IDF scores across all cluster members. V4 changes this to: the pair that appears in the most cluster members (with IDF as a tiebreak), considering only pairs in the filtered vocabulary.
+
+**Why the change?** V3's sum-of-IDF could be dominated by a single IP that tried many rare pairs, giving that IP's credentials a disproportionate influence on the cluster's signature. V4's count-first approach selects the credential that is genuinely shared across the cluster — it directly answers "which credential do most bots in this cluster have in common?"
+
+Formally, for cluster $C$ with members $\{i_1, i_2, \ldots, i_k\}$:
+
+$$\text{count}(p, C) = \left|\{i \in C : p \in \text{pairs}(i) \cap \mathcal{P}\}\right|$$
+
+$$\text{signature}(C) = \arg\max_{p} \bigl(\text{count}(p, C),\; \text{IDF}(p)\bigr)$$
+
+where the tuple comparison means: maximise count first, then break ties by maximising IDF. Only pairs in $\mathcal{P}$ (the kept vocabulary) are considered.
+
+### Zero-vector IPs: the safe divide
+
+The L2 normalisation in V4 uses:
+
+$$\text{inv}_i = \begin{cases} \|\mathbf{v}_i^{(V4)}\|^{-1} & \|\mathbf{v}_i^{(V4)}\| > 0 \\ 0 & \text{otherwise} \end{cases}$$
+
+implemented in NumPy as:
+
+```python
+norms = np.sqrt(np.asarray(M.multiply(M).sum(axis=1)).ravel())
+inv   = np.divide(1.0, norms, out=np.zeros_like(norms), where=norms > 0)
+M     = sp.diags(inv) @ M
+```
+
+The `out=np.zeros_like(norms)` initialises the output array to zeros, and `where=norms > 0` ensures division only occurs for non-zero norms. Zero-norm rows receive `inv=0` and their rows remain all-zero after multiplication by the diagonal matrix. This avoids both `NaN` (division by zero) and the V3 workaround of replacing zero norms with 1.0 (which would give zero-vector IPs a spurious unit length in undefined direction).
+
+### Plain modularity Leiden vs RBConfiguration
+
+V3 used `leidenalg.RBConfigurationVertexPartition` with `resolution_parameter=1.0`. This is equivalent to maximising:
+
+$$Q_\gamma = \frac{1}{2m}\sum_{i,j}\!\left[w_{ij} - \gamma \cdot \frac{k_i\,k_j}{2m}\right]\delta(c_i,\,c_j)$$
+
+At $\gamma = 1.0$, this is identical to standard modularity $Q$. V4 uses `leidenalg.ModularityVertexPartition` directly, which maximises $Q$ at $\gamma = 1$ without exposing the resolution parameter as a variable. This makes the algorithm choice explicit, prevents accidental tuning, and ensures that the vocabulary-filtering change — not a resolution change — is the single variable between V3 and V4.
 

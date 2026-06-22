@@ -12,9 +12,15 @@ across 40,474 unique credential pairs. IP addresses are anonymised (`IP_42`, etc
 
 ## Method
 
-Each IP is represented as a TF-IDF vector in credential space. Cosine similarity
-between vectors forms the edge weights of a graph. Leiden community detection then
-finds groups of IPs with similar credential behaviour (probable botnets).
+Each IP is represented as a TF-IDF vector in credential space. Before IDF is
+computed, near-universal credentials (used by >10% of all IPs) are removed as
+stopwords — they are too common to distinguish botnets and their presence in all
+vectors causes L2 normalisation to re-inflate their influence even after IDF
+down-weighting. Singletons (used by exactly one IP) are also removed.
+
+Cosine similarity between the filtered vectors forms edge weights in a graph.
+Leiden community detection (plain modularity) then finds groups of IPs with
+similar credential behaviour (probable botnets).
 
 Full methodology, results, and algorithm explanations:
 [clustering_report.md](clustering_report.md)
@@ -33,7 +39,19 @@ python cluster_attackers.py
 | `cluster_results.csv` | Every IP with community ID, cluster size, and signature credential |
 | `attacker_graph.png` | Graph visualisation coloured by community |
 
-## Results (V3)
+## Results
+
+### V4 (current — stopword filtering applied)
+
+V4 results are pending the next script run. Expected outcomes based on the
+vocabulary filter removing the canary credentials:
+
+- Largest cluster drops sharply from V3's 3,329 IPs (expected: low hundreds)
+- Singleton count rises — the canary was previously gluing unrelated IPs together
+- Known-good clusters survive: Perl exploit tool (7 IPs), SIP scanner (~24 IPs), TLS probe (8 IPs)
+- No cluster signature credential used by >10% of all IPs
+
+### V3 (baseline — for comparison)
 
 | Metric | Value |
 |---|---|

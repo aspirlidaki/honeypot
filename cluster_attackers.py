@@ -16,8 +16,8 @@ The rarer the shared pairs, the more confident we can be.
 
 We model this as a graph where each node is an attacker IP, each edge
 connects two IPs that share at least one credential pair, and the edge
-weight is the sum of IDF scores of those shared pairs so that rare pairs
-count more than common ones.
+weight is the cosine similarity of their TF-IDF credential vectors so
+that rare pairs count more than common ones.
 
 Dense subgraphs are probable botnets.
 
@@ -31,9 +31,25 @@ The formula is log(total_IPs / IPs_that_used_this_pair), so a pair used by
 2791 IPs gets a score of 0.578 (nearly useless) while a pair used by only
 7 IPs gets 6.563 (very meaningful).
 
-The edge weight between two IPs is the sum of IDF scores of their shared
-pairs. Sharing a rare pair gives a heavy edge, sharing only common pairs
-gives a light one.
+V3 replaced raw IDF-sum edge weights with cosine similarity and switched
+from Louvain to Leiden community detection.
+
+WHY VOCABULARY FILTERING (V4)
+IDF alone is insufficient when a near-universal credential appears across
+33-56% of all IPs. After L2 normalisation, cosine similarity still picks
+up the influence of such credentials because they contribute to the vector
+length of every IP that carries them. The correct fix is to treat them as
+stopwords and remove them from the vocabulary entirely, so they have no
+presence in any vector and cannot form or strengthen any edge.
+
+V4 applies two filters before computing IDF:
+  - Drop any credential used by more than MAX_DF_FRACTION (10%) of all IPs.
+    This removes canary credentials and other near-universal stopwords.
+  - Drop credentials only one IP ever tried (singletons). They cannot link
+    any pair of IPs, and they inflate vector norms without contributing signal.
+
+IPs whose entire credential set was filtered out become singletons —
+they link to nobody, which is correct rather than a bug.
 """
 import argparse
 import csv
@@ -58,8 +74,11 @@ DATA_FILE = "cowrie_ip_username_pass_anon.csv"
 # Setting this to 0.10 requires at least roughly 10% normalised overlap.
 MIN_COSINE_SIM = 0.10
 
-# Higher resolution means more communities but smaller ones.
-LEIDEN_RESOLUTION = 1.0
+# Vocabulary filters applied before IDF is computed.
+# Credentials used by more than MAX_DF_FRACTION of all IPs are stopwords.
+# Credentials used by fewer than MIN_DF IPs are singletons and are also dropped.
+MAX_DF_FRACTION = 0.10   # drop a credential used by more than 10% of all IPs
+MIN_DF          = 2      # drop a credential only one IP ever tried
 
 OUTPUT_PLOT = "attacker_graph.png"
 OUTPUT_CSV  = "cluster_results.csv"
@@ -118,32 +137,51 @@ def build_mappings(records):
     return pair_to_ips, ip_to_pairs, all_ips
 
 
-# IDF = log( total_IPs / IPs_that_used_this_pair )
-
-def compute_idf(pair_to_ips, total_ips):
+def keep_useful_pairs(pair_to_ips, n_ips):
     """
-    Compute IDF for every credential pair, which basically tells us how rare it is.
+    Compute IDF for credential pairs that survive vocabulary filtering.
 
-    A high IDF (around 8.5) means almost nobody tried this pair, so two IPs
-    sharing it is strong evidence they are from the same botnet.
-    A low IDF (around 0.5) means tons of IPs tried it, so it is basically
-    useless as a signal.
+    Two classes of credential are excluded before IDF is computed:
 
-    Some examples from this dataset:
-        345gs5662d34 / 345gs5662d34 was tried by 2791 IPs so IDF is 0.578 (useless)
-        admin / admin was tried by 452 IPs so IDF is 2.398 (moderate)
-        perl / warning was tried by only 7 IPs so IDF is 6.563 (very useful)
+    Stopwords (df > MAX_DF_FRACTION * n_ips): credentials so common that
+    sharing them carries no information about botnet membership. The canary
+    credential (345gs5662d34/345gs5662d34, ~56% of IPs) is the canonical
+    example. IDF gives it a score of only 0.578, but after L2 normalisation
+    cosine similarity re-inflates its influence because it contributes to the
+    vector norm of every IP that tried it. Removing it from the vocabulary
+    entirely is the correct fix: it has no dimension in any vector, so it
+    cannot form or strengthen any edge.
+
+    Singletons (df < MIN_DF): credentials only one IP ever tried. They cannot
+    link any pair of IPs (their dimension is zero for every other IP's vector),
+    and they inflate the norms of the IPs that tried them, weakening those IPs'
+    cosine similarity with their genuine botnet peers.
+
+    Prints the list of dropped stopwords as a sanity check.
+    Returns a dict of (pair -> IDF) for the surviving pairs only.
     """
+    max_df = MAX_DF_FRACTION * n_ips
     idf = {}
-    N = total_ips
+    dropped = []
 
-    for pair, ip_set in pair_to_ips.items():
-        df = len(ip_set)
-        idf[pair] = math.log(N / df)
+    for pair, ips in pair_to_ips.items():
+        df = len(ips)
+        if df > max_df:
+            dropped.append(pair)
+            continue
+        if df < MIN_DF:
+            continue
+        idf[pair] = math.log(n_ips / df)
 
-    scores = list(idf.values())
-    print(f"IDF computed for {len(idf):,} pairs.")
-    print(f"Range: {min(scores):.3f} (most common) to {max(scores):.3f} (rarest)")
+    n_singletons = sum(1 for s in pair_to_ips.values() if len(s) < MIN_DF)
+    print(f"Vocabulary filter: {len(idf):,} pairs kept "
+          f"(dropped {len(dropped)} stopwords, {n_singletons:,} singletons).")
+    print(f"Dropped too-common credentials ({len(dropped)}): "
+          f"{[f'{u}/{p}' for u, p in dropped[:5]]}")
+
+    if idf:
+        scores = list(idf.values())
+        print(f"IDF range after filtering: {min(scores):.3f} to {max(scores):.3f}")
 
     return idf
 
@@ -152,32 +190,29 @@ def build_graph(ip_to_pairs, all_ips, idf):
     """
     Build an undirected weighted graph where edge weights are cosine similarities.
 
-    Each IP is represented as a vector in credential space where each dimension
-    is a credential pair and the value is that pair's IDF score (or 0 if the IP
-    never tried it). Cosine similarity between two such vectors is the edge weight.
+    Each IP is represented as a sparse vector in credential space. Only pairs
+    surviving the vocabulary filter (present in idf) appear as dimensions.
+    IPs whose every credential was filtered out have all-zero vectors — they
+    link to nobody and become singletons, which is correct.
 
-    This normalises for credential list size so an IP that tried 10,000 pairs is
-    compared on the same scale as one that tried 50. Only the pattern matters,
-    not the volume.
-
-    We use a sparse matrix to compute all similarities at once instead of looping
-    over every pair of IPs. With 5000 IPs a naive loop would be 12.5 million
-    comparisons, which is way too slow. The matrix approach does it in one call.
-
-    The process: build a matrix M where rows are IPs and columns are credential
-    pairs, fill in IDF scores, normalise each row by its length, then multiply
-    M by its own transpose. The result at position i,j is the cosine similarity
-    between IP i and IP j. We only keep the upper triangle to avoid duplicates.
+    The process: build a matrix M where rows are IPs and columns are the kept
+    credential pairs, fill in IDF scores, L2-normalise each row (IPs with a
+    zero row stay zero rather than producing NaN), then compute S = M @ M.T.
+    The entry at position (i, j) is the cosine similarity between IP i and IP j.
+    We only keep the upper triangle to avoid duplicates and drop entries below
+    MIN_COSINE_SIM before constructing the graph.
     """
     ip_idx    = {ip:   i for i, ip   in enumerate(all_ips)}
     all_pairs = list(idf.keys())
     pair_idx  = {pair: j for j, pair in enumerate(all_pairs)}
 
-    # fill in the non-zero IDF values for each IP's credential pairs
+    # fill in IDF scores for each IP's credential pairs; skip filtered-out pairs
     rows, cols, vals = [], [], []
     for ip, pair_set in ip_to_pairs.items():
         i = ip_idx[ip]
         for pair in pair_set:
+            if pair not in pair_idx:
+                continue
             rows.append(i)
             cols.append(pair_idx[pair])
             vals.append(idf[pair])
@@ -188,13 +223,14 @@ def build_graph(ip_to_pairs, all_ips, idf):
         dtype=np.float32,
     )
 
-    # normalise each row by its L2 norm so volume doesn't dominate
-    norms = np.asarray(M.power(2).sum(axis=1)).flatten() ** 0.5
-    norms[norms == 0] = 1.0  # avoid dividing by zero for isolated IPs
-    M_norm = sp.diags(1.0 / norms) @ M
+    # L2-normalise each row; IPs with all-zero rows (every credential filtered)
+    # receive inv=0 so their rows stay zero and they form no edges
+    norms = np.sqrt(np.asarray(M.multiply(M).sum(axis=1)).ravel())
+    inv   = np.divide(1.0, norms, out=np.zeros_like(norms), where=norms > 0)
+    M     = sp.diags(inv) @ M
 
     # multiply to get all cosine similarities, upper triangle only to skip duplicates
-    S = sp.triu(M_norm @ M_norm.T, k=1).tocoo()
+    S = sp.triu(M @ M.T, k=1).tocoo()
 
     G = nx.Graph()
     for ip in all_ips:
@@ -212,22 +248,18 @@ def build_graph(ip_to_pairs, all_ips, idf):
     return G
 
 
-def detect_communities(G, resolution=1.0):
+def detect_communities(G):
     """
     Run the Leiden algorithm to find communities (clusters) in the graph.
 
-    Leiden (2019) is the successor to Louvain (2008). Both algorithms try to
-    maximise modularity, which measures whether communities are significantly
-    denser than you would expect in a random network with the same degree
-    distribution. Higher modularity means the communities are more real.
-
-    Leiden's key improvement over Louvain is that Louvain can produce
-    communities that are internally disconnected. Leiden adds a refinement
-    phase that guarantees every community is well-connected.
+    Uses plain modularity (ModularityVertexPartition) with no resolution
+    parameter — the standard Leiden configuration. Leiden (2019) is the
+    successor to Louvain (2008) and adds a refinement phase that guarantees
+    every output community is well-connected.
 
     We use seed=42 so results are reproducible across runs.
     """
-    print(f"Running Leiden community detection (resolution={resolution}) ...")
+    print("Running Leiden community detection (plain modularity) ...")
 
     nodes    = list(G.nodes())
     node_idx = {n: i for i, n in enumerate(nodes)}
@@ -240,9 +272,8 @@ def detect_communities(G, resolution=1.0):
 
     partition = leidenalg.find_partition(
         ig_G,
-        leidenalg.RBConfigurationVertexPartition,
+        leidenalg.ModularityVertexPartition,
         weights=weights or None,
-        resolution_parameter=resolution,
         seed=42,
     )
 
@@ -263,12 +294,11 @@ def analyse_clusters(partition, ip_to_pairs, idf, records):
     Turn the raw partition (IP to community id) into human-readable stats.
 
     For each community we find the size, the signature credential (the pair
-    with the highest total IDF contribution across all IPs in that community,
-    which is the most discriminating credential for that botnet), and the top
-    credentials by raw frequency.
+    present in the most cluster members among the kept vocabulary, with IDF
+    as a tiebreak), and the top credentials by raw attempt frequency.
 
-    We use ip_to_pairs which stores sets, so each pair is counted once per IP
-    and retries don't inflate the counts.
+    Pairs absent from idf (filtered stopwords and singletons) are excluded
+    from the signature selection — they are not informative.
     """
     print("\nAnalysing clusters ...\n")
 
@@ -284,37 +314,40 @@ def analyse_clusters(partition, ip_to_pairs, idf, records):
 
     clusters = []
     for comm_id, ips in community_to_ips.items():
-        pair_count   = collections.Counter()
-        pair_idf_sum = collections.Counter()
+        pair_count = collections.Counter()
+        # sig_score[pair] = (member_count, idf_value) — only for kept pairs
+        sig_score  = {}
 
         for ip in ips:
-            # sum IDF scores per pair across all IPs in this community
             for pair in ip_to_pairs[ip]:
-                pair_idf_sum[pair] += idf.get(pair, 0)
-            # count raw occurrences for frequency stats
+                if pair in idf:
+                    count, _ = sig_score.get(pair, (0, 0.0))
+                    sig_score[pair] = (count + 1, idf[pair])
             for pair in ip_to_raw_pairs[ip]:
                 pair_count[pair] += 1
+
+        if sig_score:
+            sig_pair = max(sig_score.items(),
+                           key=lambda kv: (kv[1][0], kv[1][1]))[0]
+        else:
+            sig_pair = None
 
         clusters.append({
             "community_id":  comm_id,
             "size":          len(ips),
             "ips":           ips,
             "top_by_count":  pair_count.most_common(5),
-            "signature":     pair_idf_sum.most_common(3),
+            "signature":     sig_pair,
         })
 
     # show largest clusters first
     clusters.sort(key=lambda c: c["size"], reverse=True)
 
-    print(f"{'Rank':<5} {'CommID':<8} {'Size':>6}  Signature credential (top IDF)")
-    print("-" * 75)
+    print(f"{'Rank':<5} {'CommID':<8} {'Size':>6}  Signature credential")
+    print("-" * 70)
     for rank, cl in enumerate(clusters, 1):
-        if cl["signature"]:
-            sig_pair  = cl["signature"][0][0]
-            sig_score = cl["signature"][0][1]
-            sig_str = f"{sig_pair[0]}/{sig_pair[1]}  (IDF-sum={sig_score:.1f})"
-        else:
-            sig_str = "none"
+        sig = cl["signature"]
+        sig_str = f"{sig[0]}/{sig[1]}" if sig else "none"
         print(f"{rank:<5} {cl['community_id']:<8} {cl['size']:>6}  {sig_str}")
         if rank >= 20:
             remaining = len(clusters) - 20
@@ -398,7 +431,7 @@ def visualise_graph(G, partition, output_file, max_nodes=600):
     ax.set_facecolor("#0d0d1a")
     fig.patch.set_facecolor("#0d0d1a")
     ax.set_title(
-        f"Attacker Similarity Graph (TF-IDF weighted)\n"
+        f"Attacker Similarity Graph (TF-IDF weighted, stopwords removed)\n"
         f"{sub.number_of_nodes()} IPs, {sub.number_of_edges()} edges, "
         f"colour = community/botnet",
         fontsize=13, fontweight="bold", color="white", pad=12
@@ -440,8 +473,8 @@ def save_results(clusters, output_file):
     Save cluster assignments to CSV.
 
     Each row is one IP with its community id, the total size of that cluster,
-    and the signature credential (the highest IDF-sum pair for that community,
-    formatted as username/password).
+    and the signature credential (the pair most cluster members share among the
+    kept vocabulary, formatted as username/password).
     """
     with open(output_file, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -449,10 +482,8 @@ def save_results(clusters, output_file):
                           "signature_credential"])
 
         for cl in clusters:
-            sig = ""
-            if cl["signature"]:
-                u, p = cl["signature"][0][0]
-                sig = f"{u}/{p}"
+            sig_pair = cl["signature"]
+            sig = f"{sig_pair[0]}/{sig_pair[1]}" if sig_pair else ""
             for ip in cl["ips"]:
                 writer.writerow([ip, cl["community_id"], cl["size"], sig])
 
@@ -483,16 +514,16 @@ def main():
     args = parser.parse_args()
 
     print("=" * 65)
-    print("  HONEYPOT ATTACKER CLUSTERING  -  VERSION 3")
-    print("  Cosine Similarity Graph + Leiden Community Detection")
+    print("  HONEYPOT ATTACKER CLUSTERING  -  VERSION 4")
+    print("  TF-IDF with Stopword Removal + Leiden Community Detection")
     print("=" * 65)
     print()
 
     records = load_data(args.input)
     pair_to_ips, ip_to_pairs, all_ips = build_mappings(records)
-    idf = compute_idf(pair_to_ips, len(all_ips))
+    idf = keep_useful_pairs(pair_to_ips, len(all_ips))
     G = build_graph(ip_to_pairs, all_ips, idf)
-    partition = detect_communities(G, LEIDEN_RESOLUTION)
+    partition = detect_communities(G)
     clusters = analyse_clusters(partition, ip_to_pairs, idf, records)
     visualise_graph(G, partition, args.output_plot)
     save_results(clusters, args.output_csv)
