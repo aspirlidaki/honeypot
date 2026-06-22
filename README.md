@@ -22,7 +22,7 @@ Full methodology, results, and algorithm explanations:
 ## Usage
 
 ```bash
-pip install networkx scipy numpy leidenalg igraph matplotlib
+pip install -r requirements.txt
 python cluster_attackers.py
 ```
 
@@ -37,11 +37,12 @@ python cluster_attackers.py
 
 | Metric | Value |
 |---|---|
-| Total communities | 188 |
-| Largest cluster | 856 IPs — Admin/Admin botnet |
-| Clusters ≥ 10 IPs | 13 |
-| Singletons (no shared credentials) | 159 |
+| Total communities | 255 |
+| Largest cluster | 3,329 IPs — Canary botnet (root/3245gs5662d34) |
+| Clusters ≥ 10 IPs | 9 |
+| Singletons (no shared credentials) | 224 |
 
-Notable clusters: Mirai-style IoT scanner (856 IPs), canary botnet family
-(~3,358 IPs across 9 sub-clusters), Debian-targeting botnet (372 IPs),
-Go-based multi-protocol scanner (160 IPs), SIP/VoIP fraud scanner (24 IPs).
+Notable clusters: Canary botnet (3,329 IPs), Admin/Admin botnet (393 IPs),
+root/root botnet (377 IPs), Debian-targeting botnet (196 IPs),
+Go-based multi-protocol scanner (160 IPs), SIP/VoIP fraud scanner (24 IPs),
+Raspberry Pi scanner (17 IPs), Perl exploit tool (7 IPs).

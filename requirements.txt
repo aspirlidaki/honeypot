@@ -1,0 +1,6 @@
+networkx>=3.6
+scipy>=1.17
+numpy>=2.4
+igraph>=1.0
+leidenalg>=0.12
+matplotlib>=3.10

@@ -94,36 +94,33 @@ No stable threshold exists — IDF weighting is the correct fix.
 | Edge weighting | Raw count | IDF sum | Cosine similarity |
 | Community algorithm | Louvain | Louvain | Leiden |
 | Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 |
-| Largest cluster | 1,974 IPs | 856 IPs | (run script) |
-| Clusters >= 10 IPs | 6 | 13 | (run script) |
-| Clusters >= 2 IPs | 21 | 29 | (run script) |
-| Artificial mega-clusters | 3 | 0 | (run script) |
-| Singletons | 159 | 159 | (run script) |
-| Total communities | 179 | 188 | (run script) |
+| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs |
+| Clusters >= 10 IPs | 6 | 13 | 9 |
+| Clusters >= 2 IPs | 21 | 29 | 31 |
+| Artificial mega-clusters | 3 | 0 | 0 |
+| Singletons | 159 | 159 | 224 |
+| Total communities | 179 | 188 | 255 |
 
 ### Cluster Distribution
 
 | Size | Count | Identity |
 |---|---|---|
-| 856 | 1 | Admin/Admin botnet |
-| 556 | 1 | Canary sub-cluster A |
-| 465 | 1 | Canary sub-cluster B |
-| 432 | 1 | Canary sub-cluster C |
-| 429 | 1 | Canary sub-cluster D |
-| 384 | 1 | Canary sub-cluster E |
-| 383 | 1 | Canary sub-cluster F |
-| 372 | 1 | Debian-targeting botnet |
-| 314 | 1 | Canary sub-cluster G |
-| 254 | 1 | Canary sub-cluster H |
+| 3,329 | 1 | Canary botnet (root/3245gs5662d34) |
+| 393 | 1 | Admin/Admin botnet |
+| 377 | 1 | root/root botnet |
+| 196 | 1 | Debian-targeting botnet |
+| 162 | 1 | Unknown (signature: root/------fuck------) |
 | 160 | 1 | HTTP/Go scanner |
-| 141 | 1 | Ubuntu-targeting botnet |
+| 32 | 1 | jakob/jakob cluster |
 | 24 | 1 | SIP/VoIP scanner |
+| 17 | 1 | Raspberry Pi scanner (pi/raspberryraspberry993311) |
 | 8 | 1 | TLS binary probe |
 | 7 | 1 | Perl exploit tool |
+| 5 | 1 | a/a cluster |
 | 3 | 1 | Ethereum miner |
-| 2 | 13 | Crypto-miner pairs (BTC/XMR/ETH) |
-| 1 | 159 | Singletons |
-| **Total** | **188** | |
+| 2 | 18 | Small pairs (crypto-miners, misc) |
+| 1 | 224 | Singletons |
+| **Total** | **255** | |
 
 ### Graph
 
@@ -135,82 +132,64 @@ No stable threshold exists — IDF weighting is the correct fix.
 
 ## 4. Cluster Analysis
 
-**Community 14 — Admin/Admin Botnet (856 IPs)**
-Signature: `admin/admin` (IDF-sum = 1,060). Credential dictionary targets consumer routers, IP cameras, NAS devices, and single-board computers using factory-default credentials. Consistent with Mirai-style IoT scanning.
+**Community 0 — Canary Botnet (3,329 IPs)**
+Signature: `root/3245gs5662d34`. The largest cluster. V3's cosine similarity metric merges the nine sub-clusters that V2 separated — all share the canary credential `345gs5662d34/345gs5662d34` as the dominant signal, and after L2 normalisation the secondary credential differences that drove V2's splitting are insufficient to produce distinct communities at `MIN_COSINE_SIM = 0.10`. The canary string is a deliberate operator fingerprint inserted to identify their bots in honeypot logs. Scale and technique indicate a professional threat actor.
 
 ---
 
-**Communities 7, 9, 6, 20, 10, 21, 4, 32, 1 — Canary Botnet Family (~3,358 IPs)**
-Signature: `root/3245gs5662d34`. Nine sub-clusters unified by the canary credential `345gs5662d34/345gs5662d34`. TF-IDF separates them by secondary credential differences (likely deployment waves or geographic groups).
-
-| Community | Size | Note |
-|---|---|---|
-| 7 | 556 | |
-| 9 | 465 | |
-| 6 | 432 | |
-| 20 | 429 | |
-| 10 | 384 | |
-| 21 | 383 | |
-| 4 | 314 | |
-| 32 | 254 | |
-| 1 | 141 | Signature: `ubuntu/Test123!` |
-
-The canary string is a deliberate operator fingerprint — a nonsense value inserted to identify their bots in honeypot logs. Scale and technique indicate a professional threat actor.
+**Community 1 — Admin/Admin Botnet (393 IPs)**
+Signature: `admin/admin`. Credential dictionary targets consumer routers, IP cameras, NAS devices, and single-board computers using factory-default credentials. Consistent with Mirai-style IoT scanning.
 
 ---
 
-**Community 2 — Debian-Targeting Botnet (372 IPs)**
-Signature: `root/debian` (IDF-sum = 600). Targets Debian-based Linux servers with default root credentials (Debian, Ubuntu, Raspberry Pi OS).
+**Community 2 — root/root Botnet (377 IPs)**
+Signature: `root/root`. Targets Linux servers and embedded devices where the root account retains its default password. Overlaps in target profile with the Debian-targeting cluster but uses a distinct credential list.
 
 ---
 
-**Community 13 — HTTP/Go Scanner (160 IPs)**
+**Community 3 — Debian-Targeting Botnet (196 IPs)**
+Signature: `root/debian`. Targets Debian-based Linux servers with default root credentials (Debian, Ubuntu, Raspberry Pi OS).
+
+---
+
+**Community 5 — HTTP/Go Scanner (160 IPs)**
 Signature: HTTP headers (`User-Agent: Mozilla/5.0`, `Accept: */*`) sent as SSH credentials. Not an SSH brute-force tool — a Go-based multi-protocol scanner probing port 22 for misconfigured HTTP servers or Redis instances.
 
 ---
 
-**Community 46 — SIP/VoIP Scanner (24 IPs)**
+**Community 7 — SIP/VoIP Scanner (24 IPs)**
 Signature: `OPTIONS sip:nm SIP/2.0` / `Via: SIP/2.0/TCP nm;branch=foo`. All 24 IPs send the same 7-line SIP OPTIONS request. Target: VoIP PBX systems for toll fraud.
 
 ---
 
-**Community 38 — TLS Binary Probe (8 IPs)**
+**Community 8 — Raspberry Pi Scanner (17 IPs)**
+Signature: `pi/raspberryraspberry993311`. Targets Raspberry Pi devices that have not changed the default `pi` user password. The doubled password string (`raspberry` × 2 + digits) matches a known default credential for early Raspberry Pi OS images.
+
+---
+
+**Community 9 — TLS Binary Probe (8 IPs)**
 Signature: Raw TLS ClientHello bytes (`\x16\x03\x03`). Probing port 22 for services accidentally running TLS (HTTPS, LDAPS).
 
 ---
 
-**Community 101 — Perl Exploit Tool (7 IPs)**
+**Community 10 — Perl Exploit Tool (7 IPs)**
 Signature: `perl/warning` (IDF = 6.563). All 7 IPs try exactly this one pair. Fingerprint of a specific Perl-based exploit tool.
 
 ---
 
-**Community 106 — Ethereum Miner (3 IPs)**
+**Community 12 — Ethereum Miner (3 IPs)**
 Signature: `eth/ethereum12345`. Attempting to install Ethereum mining software on compromised servers.
 
 ---
 
-**Crypto-Miner Pairs — 13 clusters × 2 IPs**
-
-| Username | Password | Currency |
-|---|---|---|
-| `admin` | `eth!123` | Ethereum |
-| `wallet` | `wallet12345` | — |
-| `wallet` | `wallet@12345` | — |
-| `bitcoin` | `BTC#2025` | Bitcoin |
-| `xmr` | `xmr%2025` | Monero |
-| `xmr` | `XMR1234` | Monero |
-| `bitcoin` | `bitcoin123` | Bitcoin |
-| `eth` | `eth12345` | Ethereum |
-| `xmr` | `xmr%123` | Monero |
-| + 4 more | various | BTC/XMR/ETH |
-
-Monero dominates: CPU-efficient RandomX mining and untraceable transactions make it the standard for illicit crypto-mining.
+**Small pairs — 18 clusters × 2 IPs**
+Crypto-miner usernames (`xmr`, `bitcoin`, `eth`, `wallet`) and miscellaneous pairs. Monero dominates: CPU-efficient RandomX mining and untraceable transactions make it the standard for illicit crypto-mining.
 
 ---
 
 ## 5. Threat Intelligence
 
-**Canary credential = professional operator.** `345gs5662d34` across ~3,000 IPs in 9 sub-clusters is not accidental. The operator inserted it deliberately to fingerprint their fleet. Scale and technique rule out opportunistic actors.
+**Canary credential = professional operator.** `345gs5662d34` across 3,329 IPs is not accidental. The operator inserted it deliberately to fingerprint their fleet. Scale and technique rule out opportunistic actors.
 
 **Port 22 captures non-SSH traffic.** HTTP scanners (160 IPs), SIP scanners (24 IPs), and TLS probers (8 IPs) were all captured. Attackers scan all open ports for any exploitable service.
 

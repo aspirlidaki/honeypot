@@ -206,6 +206,8 @@ def build_graph(ip_to_pairs, all_ips, idf):
 
     print(f"Graph built: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges.")
     print(f"(Cosine similarity threshold: {MIN_COSINE_SIM})")
+    if G.number_of_edges() == 0:
+        print(f"Warning: no edges formed. Try lowering MIN_COSINE_SIM.")
 
     return G
 
@@ -345,18 +347,34 @@ def visualise_graph(G, partition, output_file, max_nodes=600):
     print(f"\nVisualising graph, saving to '{output_file}' ...")
 
     # only include components with at least 2 nodes, singletons are just noise
-    components = [c for c in nx.connected_components(G) if len(c) >= 2]
+    components = sorted(
+        [c for c in nx.connected_components(G) if len(c) >= 2],
+        key=len, reverse=True
+    )
     if not components:
         print("No edges in graph, nothing to draw.")
         return
 
-    lcc_nodes = max(components, key=len)
-    original_size = len(lcc_nodes)
-    if original_size > max_nodes:
-        lcc_nodes = set(list(lcc_nodes)[:max_nodes])
-        print(f"Showing {max_nodes} of {original_size} nodes.")
+    # collect nodes from the largest components first, filling up to max_nodes;
+    # when a component is too large to fit whole, take the highest-degree nodes
+    selected = set()
+    for comp in components:
+        if len(selected) >= max_nodes:
+            break
+        remaining = max_nodes - len(selected)
+        if len(comp) <= remaining:
+            selected |= comp
+        else:
+            sub_temp = G.subgraph(comp)
+            by_deg = sorted(comp, key=lambda n: sub_temp.degree(n), reverse=True)
+            selected |= set(by_deg[:remaining])
 
-    sub = G.subgraph(lcc_nodes)
+    total_non_singleton = sum(len(c) for c in components)
+    if total_non_singleton > max_nodes:
+        print(f"Showing {len(selected)} of {total_non_singleton} non-singleton nodes "
+              f"across {len(components)} components.")
+
+    sub = G.subgraph(selected)
 
     # assign one colour per community
     unique_comms  = list(set(partition[n] for n in sub.nodes()))
@@ -452,6 +470,16 @@ def main():
         help=f"Path to the input CSV file (default: {DATA_FILE}). "
              "Must have columns: ip, username, password."
     )
+    parser.add_argument(
+        "--output-plot",
+        default=OUTPUT_PLOT,
+        help=f"Path for the output graph image (default: {OUTPUT_PLOT})."
+    )
+    parser.add_argument(
+        "--output-csv",
+        default=OUTPUT_CSV,
+        help=f"Path for the output CSV file (default: {OUTPUT_CSV})."
+    )
     args = parser.parse_args()
 
     print("=" * 65)
@@ -466,8 +494,8 @@ def main():
     G = build_graph(ip_to_pairs, all_ips, idf)
     partition = detect_communities(G, LEIDEN_RESOLUTION)
     clusters = analyse_clusters(partition, ip_to_pairs, idf, records)
-    visualise_graph(G, partition, OUTPUT_PLOT)
-    save_results(clusters, OUTPUT_CSV)
+    visualise_graph(G, partition, args.output_plot)
+    save_results(clusters, args.output_csv)
 
     print("\nDone.")
 

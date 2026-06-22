@@ -194,61 +194,53 @@ These IPs could be:
 
 ---
 
-## Part 5 — Recommended Fixes for V3 (The Optimal Approach)
+## Part 5 — What Changed in V3
 
-**Fix 1 — Raise MIN_EDGE_WEIGHT to 1.0 ✓ Done**
+V3 introduced two fixes to the remaining problems in V2.
 
-`MIN_EDGE_WEIGHT` is now `1.0`. Two IPs are only connected if their shared credentials have a combined IDF sum exceeding 1.0. The canary pair alone (IDF = 0.578) can never form an edge by itself — two IPs need to share at least one moderately rare credential, or several common ones that together exceed the threshold.
+**Fix 1 — Replace Louvain with the Leiden Algorithm**
 
----
-
-**Fix 2 — Replace Louvain with the Leiden Algorithm**
-
-**The problem:** Louvain (2008) has a known mathematical flaw — it can produce communities that are internally disconnected (a node can be in a community but have no direct edge to some other nodes in that same community). It also tends to merge smaller communities that should be kept separate.
-
-**The fix:** Use **Leiden** (2019) — the state-of-the-art successor to Louvain. Leiden guarantees that all communities are well-connected internally. It also tends to find more, better-separated communities.
-
-Install: `pip install leidenalg igraph`
-
-In code, it is a near drop-in replacement for `community_louvain.best_partition()`.
+Louvain (2008) has a known mathematical flaw: it can produce communities that are internally disconnected. Leiden (2019) adds a refinement phase that checks connectivity within each community before aggregating, guaranteeing well-connected output.
 
 ---
 
-**Fix 3 — Use Cosine Similarity Instead of Sum-of-IDF**
+**Fix 2 — Use Cosine Similarity Instead of Sum-of-IDF**
 
-**The problem:** The current edge weight is simply the sum of IDF scores of shared pairs. This means an IP that tried 10,000 credentials will naturally accumulate higher similarity scores with everyone — not because it is more similar, but because it tried more things.
+V2's edge weight was the raw sum of IDF scores for shared pairs. An IP that tried 10,000 credentials accumulates higher sums with almost everyone — not because its credential list is similar, but because it tried more things. V3 replaces this with cosine similarity.
 
-**The fix:** Represent each IP as a **TF-IDF vector** (one dimension per credential pair, value = IDF of that pair if the IP used it, 0 otherwise), then compute **cosine similarity** between vectors.
-
-Cosine similarity is normalised — it measures the angle between two vectors, not their magnitude. So a bot that tried 10,000 credentials and a bot that tried 50 are compared on the same scale.
+Each IP is represented as a TF-IDF vector (one dimension per credential pair, value = IDF of that pair, 0 otherwise). The edge weight is then the cosine of the angle between the two vectors:
 
 ```
-cos_sim(IP_a, IP_b) = (vector_a · vector_b) / (|vector_a| x |vector_b|)
+cos_sim(IP_a, IP_b) = (vector_a · vector_b) / (|vector_a| × |vector_b|)
 
-Value: 0.0 = completely different credential sets
-       1.0 = identical credential sets
+0.0 = completely different credential sets
+1.0 = identical credential sets
 ```
 
-**How the three fixes work together (V3 design):**
+Dividing by both vector lengths removes the volume bias — a bot that tried 10,000 credentials and a bot that tried 50 are compared on the same scale.
+
+**V3 pipeline:**
 
 ```
-Step 1:  Load data                          (same as V1 and V2)
-Step 2:  Build pair to IP set mapping       (same)
-Step 3:  Compute IDF per credential pair    (same as V2)
-Step 4:  Build TF-IDF VECTOR per IP         NEW (replaces sum-of-IDF edges)
-Step 5:  Compute cosine similarity          NEW (replaces edge weight formula)
-Step 6:  Build graph with cos_sim edges,
-         MIN_EDGE_WEIGHT = 1.0              NEW (raises threshold above canary IDF)
-Step 7:  Run LEIDEN algorithm               NEW (replaces Louvain)
-Step 8:  Analyse clusters                   (same)
-Step 9:  Visualise + save                   (same)
+Step 1:  Load data
+Step 2:  Build pair → IP set and IP → pair set mappings
+Step 3:  Compute IDF per credential pair: IDF = log(N / df)
+Step 4:  Build sparse TF-IDF matrix M; L2-normalise each row
+Step 5:  Compute cosine similarity matrix S = M × M^T
+Step 6:  Add edge if cosine similarity >= MIN_COSINE_SIM (0.10)
+Step 7:  Run Leiden community detection
+Step 8:  Analyse clusters (signature credential, size, top pairs)
+Step 9:  Visualise + save
 ```
 
-Expected improvements:
-- The 9 canary sub-clusters will be properly separated
-- Smaller botnets (currently lost in the resolution limit) will emerge
-- Cluster assignments will be more stable and reproducible
-- The "IP tried many credentials" bias will be eliminated
+**V3 results (4,973 IPs, 40,474 credential pairs):**
+- Total communities: 255
+- Largest cluster: 3,329 IPs (canary botnet, `root/3245gs5662d34`)
+- Clusters >= 10 IPs: 9
+- Clusters >= 2 IPs: 31
+- Singletons: 224
+
+The V2 canary sub-clusters merged into one community of 3,329 IPs. At `MIN_COSINE_SIM = 0.10`, the secondary credential differences between the V2 sub-clusters are not large enough to prevent edges from forming across them after L2 normalisation. Raising the threshold would split them further but risks losing smaller real clusters.
 
 ---
 
@@ -301,7 +293,7 @@ V2 --- TF-IDF edge weights ------> Better separation (13 clusters >= 10 IPs)
          v
 V3 --- Cosine similarity + Leiden -> Volume bias eliminated
        MIN_COSINE_SIM = 0.10         Guaranteed well-connected communities
-       (normalised by L2 norm)       Finer-grained botnet separation
+       (normalised by L2 norm)       255 communities, largest: 3,329 IPs
 ```
 
 ---
