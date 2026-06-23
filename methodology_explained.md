@@ -57,11 +57,9 @@ The **Louvain algorithm** was then run to find tightly-connected groups of dots.
 | SIP scanner | 24 IPs | SIP protocol messages |
 | + 175 tiny clusters | 1–38 IPs | various |
 
-Three clusters contained **91% of all 4,973 IPs**. That is a red flag.
+Three clusters contained **91% of all 4,973 IPs**.
 
 **Why V1 was unreliable — the "common word" problem:**
-
-Imagine you want to find groups of friends by looking at what words they use in messages. If you find that two people both used the word "the" — that tells you nothing. Everyone uses "the". But if two people both used the very specific phrase "meet at the usual spot behind the old lighthouse at 3am" — that is a strong signal they know each other.
 
 V1 treated **all credentials equally**. The credential `345gs5662d34 / 345gs5662d34` was used by **2,791 out of 4,973 IPs = 56% of all attackers**. In V1, this single pair connected over half the dataset with equal weight to genuinely rare pairs. The result: three enormous fake mega-clusters.
 
@@ -89,8 +87,8 @@ Testing different minimum shared pair requirements shows what happens when the e
 In information retrieval (Google, document search), this exact problem was solved decades ago with **TF-IDF** (Term Frequency – Inverse Document Frequency).
 
 The logic:
-- A word that appears in every document ("the", "and") tells you nothing about which documents are similar — give it a **low weight**
-- A word that appears in only 3 documents — if two documents share it, that is very meaningful — give it a **high weight**
+- A word that appears in every document ("the", "and") tells you nothing about which documents are similar , give it a **low weight**
+- A word that appears in only 3 documents , if two documents share it, that is very meaningful -> give it a **high weight**
 
 This approach is applied to credentials:
 - **"Document"** = an attacker IP address
@@ -172,13 +170,13 @@ Louvain now correctly puts A and B in the same community (strong link), while A-
 
 **What V2 still gets wrong:**
 
-1. ~~**The canary pair (IDF=0.578) still creates edges**~~ — **Fixed.** `MIN_EDGE_WEIGHT` raised to `1.0`. The canary pair alone (IDF=0.578) can no longer form an edge by itself.
-2. **Louvain has a resolution limit** — it mathematically cannot find communities below a certain size relative to the total graph. Small botnets near the limit may get incorrectly merged.
-3. **Sum-of-IDF ignores credential list size** — an IP that tried 10,000 credentials will share more pairs with everyone, not because it is more similar, but simply because it tried more things. The proper fix normalises for this (see V3 below).
+1. **The canary pair (IDF=0.578) still creates edges** `MIN_EDGE_WEIGHT` raised to `1.0`. The canary pair alone (IDF=0.578) can no longer form an edge by itself.
+2. **Louvain has a resolution limit**  it mathematically cannot find communities below a certain size relative to the total graph. Small botnets near the limit may get incorrectly merged.
+3. **Sum-of-IDF ignores credential list size**  an IP that tried 10,000 credentials will share more pairs with everyone, not because it is more similar, but simply because it tried more things. The proper fix normalises for this (see V3 below).
 
 ---
 
-## Part 4 — What the Singletons Tell Us
+## Part 4 —  Singletons 
 
 159 IPs shared no credential pairs with anyone else. They get their own single-node communities in the results.
 
@@ -206,7 +204,7 @@ Louvain (2008) has a known mathematical flaw: it can produce communities that ar
 
 **Fix 2 — Use Cosine Similarity Instead of Sum-of-IDF**
 
-V2's edge weight was the raw sum of IDF scores for shared pairs. An IP that tried 10,000 credentials accumulates higher sums with almost everyone — not because its credential list is similar, but because it tried more things. V3 replaces this with cosine similarity.
+V2's edge weight was the raw sum of IDF scores for shared pairs. An IP that tried 10,000 credentials accumulates higher sums with almost everyone , not because its credential list is similar, but because it tried more things. V3 replaces this with cosine similarity.
 
 Each IP is represented as a TF-IDF vector (one dimension per credential pair, value = IDF of that pair, 0 otherwise). The edge weight is then the cosine of the angle between the two vectors:
 
@@ -252,7 +250,7 @@ V3 produced a 3,329-IP cluster whose signature was `root/3245gs5662d34`. The roo
 
 **The subtle failure:** L2 normalisation re-inflates near-universal credentials.
 
-When you L2-normalise a vector, you divide every dimension by the vector's total length. For an IP that tried mostly the canary credential, the canary dimension is a large fraction of the total length. Dividing by that length doesn't shrink the canary dimension to zero — it rescales it relative to the other dimensions. The result: after normalisation, two IPs that both heavily used the canary credential look similar to each other even if their rare credentials are completely different.
+When you L2-normalise a vector, you divide every dimension by the vector's total length. For an IP that tried mostly the canary credential, the canary dimension is a large fraction of the total length. Dividing by that length doesn't shrink the canary dimension to zero , it rescales it relative to the other dimensions. The result: after normalisation, two IPs that both heavily used the canary credential look similar to each other even if their rare credentials are completely different.
 
 **The simple proof:**
 
@@ -264,7 +262,7 @@ IP_B: [0.578, 6.563]  → normalised: [0.088, 0.996]
 
 cos(A, B) = 1.000 × 0.088 + 0.000 × 0.996 = **0.088**
 
-IP_A tried only the canary. IP_B tried the canary plus a rare pair. Their cosine is 0.088 — just below the 0.10 threshold, but only barely. Add a few more pairs that both share (even common ones), and they connect.
+IP_A tried only the canary. IP_B tried the canary plus a rare pair. Their cosine is 0.088 , just below the 0.10 threshold, but only barely. Add a few more pairs that both share (even common ones), and they connect.
 
 Now remove the canary from the vocabulary:
 ```
@@ -289,7 +287,7 @@ Dropped as stopwords:
   root/3245gs5662d34          (1,658 IPs = 33%)  ← secondary canary
 ```
 
-V4 also drops **singleton** credentials — those only one IP ever tried. They cannot link any pair of IPs (they appear in exactly one vector), and they inflate that IP's vector norm without helping similarity calculations.
+V4 also drops **singleton** credentials , those only one IP ever tried. They cannot link any pair of IPs (they appear in exactly one vector), and they inflate that IP's vector norm without helping similarity calculations.
 
 ### The three-filter pipeline
 
@@ -311,7 +309,7 @@ Some IPs tried only stopwords and/or singleton credentials. After filtering, the
 inv = np.divide(1.0, norms, out=np.zeros_like(norms), where=norms > 0)
 ```
 
-Zero-norm rows get `inv = 0`, so they stay all-zero after normalisation. Their cosine with every other IP is 0. They form no edges and become singleton communities. This is correct — an IP that only tried universal credentials gives us no evidence about which botnet it belongs to.
+Zero-norm rows get `inv = 0`, so they stay all-zero after normalisation. Their cosine with every other IP is 0. They form no edges and become singleton communities. This is correct , an IP that only tried universal credentials gives us no evidence about which botnet it belongs to.
 
 ### V3 → V4 pipeline diff
 
