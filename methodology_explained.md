@@ -8,6 +8,25 @@ Find groups of attackers who are **working together** — i.e., find the **botne
 
 ---
 
+## Version History at a Glance
+
+| Version | Core change | Outcome |
+|---|---|---|
+| V1 | Equal edge weights | Mega-clusters (failed) |
+| V2 | TF-IDF weighting | Better separation (improved) |
+| V3 | Cosine similarity + Leiden | Volume bias fixed (better) |
+| V4 | Stopword filtering | Near-universal credentials removed (current) |
+
+| Metric | V1 | V2 | V3 | V4 |
+|---|---|---|---|---|
+| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs | 3,367 IPs |
+| Clusters ≥ 10 IPs | 6 | 13 | 9 | 10 |
+| Clusters ≥ 2 IPs | 21 | 29 | 31 | 29 |
+| Singletons | 159 | 159 | 224 | 186 |
+| Total communities | 179 | 188 | 255 | 215 |
+
+---
+
 ## Part 1 — The Problem 
 
 **What is a botnet**
@@ -33,7 +52,7 @@ The word **unusual** matters a lot ,and it is exactly where V1 fails and V2 impr
 
 ---
 
-## Part 2 — Version 1
+## Part 2 — Version 1 (V1)
 
 **The idea behind V1:**
  **graph**:
@@ -61,7 +80,11 @@ Three clusters contained **91% of all 4,973 IPs**.
 
 **Why V1 was unreliable — the "common word" problem:**
 
-V1 treated **all credentials equally**. The credential `345gs5662d34 / 345gs5662d34` was used by **2,791 out of 4,973 IPs = 56% of all attackers**. In V1, this single pair connected over half the dataset with equal weight to genuinely rare pairs. The result: three enormous fake mega-clusters.
+V1 treated **all credentials equally**. The credential `345gs5662d34 / 345gs5662d34` was used by **2,791 out of 4,973 IPs = 56% of all attackers**.
+
+> **What is the canary pair?** `345gs5662d34 / 345gs5662d34` is called the **canary pair** because it was almost certainly a test credential deliberately inserted by the botnet operator to fingerprint their traffic in honeypot logs — a "canary in the coal mine" for attribution. Groups of IPs using it are called the **canary botnet**. At 56% prevalence it is noise, not signal. Its near-universal adoption is the single biggest reason V1 failed.
+
+In V1, this single pair connected over half the dataset with equal weight to genuinely rare pairs. The result: three enormous fake mega-clusters.
 
 **The threshold experiment:**
 
@@ -80,7 +103,7 @@ Testing different minimum shared pair requirements shows what happens when the e
 
 ---
 
-## Part 3 — Version 2: The TF-IDF Fix
+## Part 3 — Version 2: The TF-IDF Fix (V2)
 
 **The idea borrowed from text analysis:**
 
@@ -192,7 +215,7 @@ These IPs could be:
 
 ---
 
-## Part 5 — What Changed in V3
+## Part 5 — What Changed in V3 (V3)
 
 V3 introduced two fixes to the remaining problems in V2.
 
@@ -242,7 +265,7 @@ The V2 canary sub-clusters merged into one community of 3,329 IPs. At `MIN_COSIN
 
 ---
 
-## Part 5.5 — What Changed in V4
+## Part 5.5 — What Changed in V4 (V4 — June 2026, current)
 
 ### The remaining problem after V3
 
@@ -348,6 +371,39 @@ Zero-norm rows get `inv = 0`, so they stay all-zero after normalisation. Their c
 
 These three clusters would survive even the strictest thresholds because their shared credentials are so rare (IDF > 5.0) that there is no ambiguity.
 
+**Confidence scoring rubric:**
+
+A cluster earns high confidence when it meets at least two of these three criteria:
+
+| Criterion | High confidence | Borderline | Low confidence |
+|---|---|---|---|
+| Signature IDF | ≥ 5.0 | 3.0–5.0 | < 3.0 |
+| Fraction of cluster using signature | > 80% | 50–80% | < 50% |
+| Stability across random seeds | Same IPs in 3/3 runs | Same in 2/3 | Changes each run |
+
+**Rule of thumb:** A cluster is high-confidence if all member IPs share at least one credential with IDF > 5.0. Below IDF = 3.0, the signature is common enough that coincidental overlap is plausible.
+
+---
+
+## Part 6b — What This Method Cannot Detect
+
+These are structural limits, not fixable by tuning thresholds.
+
+**1. Botnets that randomize credentials per IP.**
+An operator who assigns a unique wordlist to each bot produces IPs with no shared credentials — indistinguishable from singletons.
+
+**2. Attackers switching tools between sessions.**
+If the same operator uses a different attack tool on different nights, the two sessions land in different clusters. The analysis will not know it is the same actor.
+
+**3. Slow attacks spread across weeks.**
+This analysis is a snapshot. A botnet that sends only a few attempts per day accumulates few credential pairs in any single log window. Longer observation windows improve detection.
+
+**4. Botnets sharing only common credentials.**
+If two distinct botnets both use `admin/admin` and `root/root` but nothing rarer, cosine similarity may merge or separate them unpredictably. No threshold cleanly distinguishes these cases.
+
+**5. Singletons cannot be classified.**
+186 IPs (V4) share no credential pairs with anyone after filtering. They could be lone attackers, bots with unique per-machine wordlists, researchers, or other honeypots probing ours. Credential data alone cannot distinguish between these cases.
+
 ---
 
 ## Summary: The Journey So Far
@@ -388,7 +444,7 @@ V4 --- Vocabulary filtering -------> Canary credential absent from all vectors
 
 ---
 
-## Part 7 — Version 3: The Full Mathematics
+## Appendix A — Version 3: Full Mathematics
 
 V3 implements the two fixes described in Part 5.
 
@@ -435,11 +491,26 @@ The result is always in $[0,\,1]$: **0** means completely different credential s
 IP_A tried: root/123456 (IDF=3.6)  +  perl/warning (IDF=6.6)  +  admin/admin (IDF=2.4)
 IP_B tried: root/123456 (IDF=3.6)  +  perl/warning (IDF=6.6)
 
-v_A · v_B  =  3.6² + 6.6²                           =  12.96 + 43.56  =  56.52
-||v_A||    =  sqrt(3.6² + 6.6² + 2.4²)              =  sqrt(62.28)    =  7.89
-||v_B||    =  sqrt(3.6² + 6.6²)                     =  sqrt(56.52)    =  7.52
+Step 1 — dot product (shared pairs only):
+  v_A · v_B  =  3.6×3.6  +  6.6×6.6
+             =  12.96    +  43.56
+             =  56.52
 
-cos(A, B)  =  56.52 / (7.89 × 7.52)  =  0.953   (very similar — same rare pair)
+Step 2 — vector lengths:
+  ||v_A||    =  sqrt( 3.6×3.6  +  6.6×6.6  +  2.4×2.4 )
+             =  sqrt( 12.96   +  43.56   +  5.76  )
+             =  sqrt(62.28)
+             =  7.89
+
+  ||v_B||    =  sqrt( 3.6×3.6  +  6.6×6.6 )
+             =  sqrt( 12.96   +  43.56  )
+             =  sqrt(56.52)
+             =  7.52
+
+Step 3 — cosine similarity:
+  cos(A, B)  =  56.52 / (7.89 × 7.52)
+             =  56.52 / 59.33
+             =  0.953   (very similar — rare shared pair drives this)
 ```
 
 V2 would give the same edge weight of 10.2 whether these IPs share two rare credentials or ten common ones that happen to sum to 10.2. Cosine similarity distinguishes these cases.
@@ -506,7 +577,7 @@ Leiden (Traag et al., 2019) inserts a **refinement phase** after each aggregatio
 
 ---
 
-## Part 8 — Version 4: The Full Mathematics
+## Appendix B — Version 4: Full Mathematics
 
 ### The core problem: L2 normalisation partially re-inflates stopwords
 
@@ -583,4 +654,33 @@ V3 used `leidenalg.RBConfigurationVertexPartition` with `resolution_parameter=1.
 $$Q_\gamma = \frac{1}{2m}\sum_{i,j}\!\left[w_{ij} - \gamma \cdot \frac{k_i\,k_j}{2m}\right]\delta(c_i,\,c_j)$$
 
 At $\gamma = 1.0$, this is identical to standard modularity $Q$. V4 uses `leidenalg.ModularityVertexPartition` directly, which maximises $Q$ at $\gamma = 1$ without exposing the resolution parameter as a variable. This makes the algorithm choice explicit, prevents accidental tuning, and ensures that the vocabulary-filtering change — not a resolution change — is the single variable between V3 and V4.
+
+---
+
+## V4 Pipeline Quick Reference
+
+```
+Filter:          Keep pairs where 2 ≤ df ≤ 497  (≤ 10% of 4,973 IPs)
+                 Removes canary pair (df=2,791), root/3245gs5662d34 (df=1,658),
+                 root/@qwer2025 (df=799), and all 15,325 singletons
+
+IDF:             log(4973 / df_p)   — computed after filtering
+                 Minimum IDF in kept vocabulary: ~2.30  (vs 0.578 in V3)
+
+Edge threshold:  cosine_sim ≥ 0.10
+
+Algorithm:       Leiden — ModularityVertexPartition, seed=42
+
+Signature:       Most-shared pair in cluster (IDF tiebreak)
+```
+
+**Results (4,973 IPs, 25,146 pairs after filtering):**
+
+| Metric | V4 |
+|---|---|
+| Total communities | 215 |
+| Largest cluster | 3,367 IPs (ubuntu/3245gs5662d34) |
+| Clusters ≥ 10 IPs | 10 |
+| Clusters ≥ 2 IPs | 29 |
+| Singletons | 186 |
 
