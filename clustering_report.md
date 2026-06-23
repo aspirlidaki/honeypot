@@ -7,7 +7,7 @@ Version 4 — TF-IDF with Stopword Removal + Leiden Community Detection
 | **Honeypot** | Cowrie SSH (port 22) |
 | **Data file** | `cowrie_ip_username_pass_anon.csv` |
 | **Analysis date** | June 2026 |
-| **Stack** | Python 3 · `networkx` · `scipy.sparse` · `leidenalg` · `igraph` · `matplotlib` |
+| **Tools** | Python 3, networkx, scipy.sparse, leidenalg, igraph, matplotlib |
 
 ---
 
@@ -20,30 +20,34 @@ Version 4 — TF-IDF with Stopword Removal + Leiden Community Detection
 | Unique credential pairs | 40,474 |
 | Pairs shared by more than one IP | 25,149 (62%) |
 
-62% of credential pairs appear across multiple IPs — the statistical basis for clustering. Bots in the same botnet share the same credential dictionary; shared pairs are the signal.
+The honeypot recorded 268,875 SSH login attempts from 4,973 different IP addresses. Each attempt used a username/password pair, and across the whole dataset there are 40,474 distinct pairs. The key number is 62%: more than half of all credential pairs were tried by at least two different IPs. That overlap is what makes clustering possible — if two IPs try the same rare password, there is a good reason for it.
 
 ---
 
 ## 2. Method
 
-### Hypothesis
-Two IPs that share many credential pairs are likely part of the same botnet. The rarer the shared pair, the stronger the signal.
+### The core idea
 
-### Pipeline
+Bots in the same botnet run the same attack software. That software comes loaded with a credential dictionary — a list of username/password pairs to try. So if two IPs share a large number of the same credential pairs, they are probably running the same software and belong to the same botnet. The rarer the shared pair, the stronger that conclusion.
 
-| Step | Operation |
+### Step-by-step pipeline
+
+| Step | What happens |
 |---|---|
-| 1 | Load CSV → list of `(ip, username, password)` triples |
-| 2 | Build `pair → IPs` and `IP → pairs` mappings (sets, so retries don't inflate counts) |
-| 3 | Filter vocabulary: drop credentials used by >10% of all IPs (stopwords) or by exactly 1 IP (singletons) |
-| 4 | Compute IDF per surviving credential pair: `IDF = log(N / df)` |
-| 5 | Build sparse TF-IDF matrix over kept pairs; L2-normalise rows; compute cosine similarities |
-| 6 | Add edge between two IPs if cosine similarity >= 0.10 |
-| 7 | Run Leiden community detection (plain modularity, `seed=42`) |
-| 8 | Extract signature credential per cluster (most-shared kept pair, IDF tiebreak) |
-| 9 | Visualise and export |
+| 1 | Load the CSV into a list of (IP, username, password) records |
+| 2 | Build two lookup tables: which IPs tried each pair, and which pairs each IP tried |
+| 3 | Filter the vocabulary: drop credentials used by >10% of IPs (stopwords) and credentials used by only one IP (singletons) |
+| 4 | Compute an IDF score for each surviving credential pair |
+| 5 | Build a TF-IDF matrix, normalise each row, and compute cosine similarities |
+| 6 | Connect two IPs with an edge if their cosine similarity is at least 0.10 |
+| 7 | Run Leiden community detection to find clusters |
+| 8 | Find the signature credential for each cluster and export results |
 
-### IDF Weighting
+### IDF — measuring how rare a credential is
+
+IDF stands for Inverse Document Frequency. It comes from text search, where the same problem exists: common words like "the" appear in every document and are useless for figuring out which documents are similar, while rare words like "photosynthesis" appearing in two documents is a strong signal. Here, credential pairs play the role of words, and attacker IPs play the role of documents.
+
+The formula is:
 
 ```
 IDF(pair) = log( N / df )
@@ -52,34 +56,39 @@ N  = 4,973   (total unique IPs)
 df = number of IPs that tried this pair
 ```
 
-| Credential pair | IPs | IDF | Signal strength | V4 status |
-|---|---|---|---|---|
-| `345gs5662d34/345gs5662d34` | 2,791 | 0.578 | Very low | Stopword — removed |
-| `root/3245gs5662d34` | 1,658 | 1.098 | Low | Stopword — removed |
-| `root/@qwer2025` | 799 | 1.828 | Low–medium | Stopword — removed |
-| `admin/admin` | 452 | 2.398 | Medium | Kept (minimum IDF) |
-| `root/root` | 272 | 2.906 | Medium | Kept |
-| `root/debian` | 184 | 3.298 | Medium–high | Kept |
-| `root/123456` | 131 | 3.634 | Medium–high | Kept |
-| `OPTIONS sip:.../Via: SIP/2.0/...` | ~24 | ~5.3 | High | Kept |
-| `perl/warning` | 7 | 6.563 | High | Kept |
-| `eth/ethereum12345` | 3 | 7.413 | Very high | Kept |
-| Any pair used by exactly 1 IP | 1 | 8.512 | Maximum | Singleton — removed |
+A pair tried by 2,791 IPs gets IDF = log(4973/2791) = 0.578 — nearly useless as a signal. A pair tried by only 7 IPs gets IDF = log(4973/7) = 6.563 — very strong signal. The table below shows this for a range of credentials:
 
-`MIN_COSINE_SIM = 0.10`: two IPs need at least roughly 10% normalised credential overlap to form an edge. Because cosine similarity is normalised by vector length, this threshold is stable regardless of how many credentials an IP tried.
+| Credential pair | IPs | IDF | V4 status |
+|---|---|---|---|
+| `345gs5662d34/345gs5662d34` | 2,791 | 0.578 | Stopword — removed |
+| `root/3245gs5662d34` | 1,658 | 1.098 | Stopword — removed |
+| `root/@qwer2025` | 799 | 1.828 | Stopword — removed |
+| `admin/admin` | 452 | 2.398 | Kept (lowest IDF after filtering) |
+| `root/root` | 272 | 2.906 | Kept |
+| `root/debian` | 184 | 3.298 | Kept |
+| `root/123456` | 131 | 3.634 | Kept |
+| `OPTIONS sip:.../Via: SIP/2.0/...` | ~24 | ~5.3 | Kept |
+| `perl/warning` | 7 | 6.563 | Kept |
+| `eth/ethereum12345` | 3 | 7.413 | Kept |
+| Any pair used by exactly 1 IP | 1 | 8.512 | Singleton — removed |
 
-**V4 vocabulary filter.** Before IDF is computed, two classes of credential are removed:
+The logarithm matters here. Without it, a pair used by 2,791 IPs gives N/df ≈ 1.78, while a moderately rare pair used by 50 IPs gives N/df ≈ 99.5 — those sit 56× apart on a linear scale. The log brings them to 0.578 and 4.598, a much more workable range. It also has a nice property at the extremes: a pair used by every single IP gets log(1) = 0, and a pair used by exactly one IP gets the maximum value log(N).
 
-- **Stopwords** (`df > 0.10 × N = 497`): `345gs5662d34/345gs5662d34` (df=2,791), `root/3245gs5662d34` (df=1,658), and `root/@qwer2025` (df=799) are all dropped. These three rows in the table above are stopwords in V4.
-- **Singletons** (`df < 2`): credentials only one IP ever tried are also dropped.
+### Vocabulary filtering (V4)
 
-After filtering, the minimum IDF in the retained vocabulary rises to approximately 2.3 (credentials at the 10% cutoff), eliminating the near-zero-IDF stopwords from all similarity calculations.
+Before computing IDF at all, two types of credential are removed from the vocabulary.
 
-### Why Not Version 1
+**Stopwords** are credentials used by more than 10% of all IPs (more than 497 IPs in this dataset). Three were found: `345gs5662d34/345gs5662d34` (56% of IPs), `root/3245gs5662d34` (33%), and `root/@qwer2025` (16%). The reason they have to be removed completely — not just down-weighted — is explained in Section 9.0. The short version is that IDF alone is not enough: even with a low score, these credentials still affect cosine similarity through the normalisation step, and the only proper fix is to take them out of the vector space entirely.
 
-V1 used raw shared-pair count as edge weight. The credential `345gs5662d34/345gs5662d34` (used by 56% of IPs) connected over half the graph with equal weight to genuinely rare pairs, producing three artificial mega-clusters of 1,974 / 1,294 / 1,282 IPs.
+**Singletons** are credentials tried by only one IP. They cannot create an edge between any two IPs, since by definition no other IP shares them. On top of that, they inflate the vector length of the IP that tried them, which weakens that IP's similarity scores with everyone else. Removing them makes the remaining signals cleaner.
 
-Threshold sensitivity confirmed the problem was the weighting, not the cutoff:
+After filtering, 25,146 credential pairs remain out of 40,474. IDF scores in the filtered vocabulary range from 2.398 to 7.819.
+
+### Why V1 failed
+
+V1 used raw shared-pair count as the edge weight between two IPs. The credential `345gs5662d34/345gs5662d34`, used by 56% of all IPs, connected most of the graph with the same weight as genuinely rare pairs. The result was three enormous fake clusters of roughly 1,974, 1,294, and 1,282 IPs.
+
+Trying to fix it by raising the minimum threshold did not help:
 
 | Min shared pairs | Edges | Communities | Largest cluster |
 |---|---|---|---|
@@ -89,52 +98,51 @@ Threshold sensitivity confirmed the problem was the weighting, not the cutoff:
 | 10 | 25,296 | 2,370 | 329 |
 | 50 | 422 | 4,913 | 29 |
 
-No stable threshold exists — IDF weighting is the correct fix.
+There is no stable threshold — the problem is that all credentials are treated as equally important, which they are not. IDF weighting is the right fix.
 
 ---
 
 ## 3. Results
 
-### Version Comparison
+### How each version compares
 
 | Metric | V1 | V2 | V3 | V4 |
 |---|---|---|---|---|
 | Edge weighting | Raw count | IDF sum | Cosine similarity | Cosine similarity |
 | Vocabulary filter | None | None | None | Stopwords + singletons removed |
 | Community algorithm | Louvain | Louvain | Leiden | Leiden (plain modularity) |
-| Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 | cosine sim >= 0.10 |
+| Threshold | min shared pairs | IDF sum ≥ 1.0 | cosine sim ≥ 0.10 | cosine sim ≥ 0.10 |
 | Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs | 3,367 IPs |
-| Clusters >= 10 IPs | 6 | 13 | 9 | 10 |
-| Clusters >= 2 IPs | 21 | 29 | 31 | 29 |
-| Artificial mega-clusters | 3 | 0 | 0 | 0 (canary filtered from vocabulary) |
+| Clusters ≥ 10 IPs | 6 | 13 | 9 | 10 |
+| Clusters ≥ 2 IPs | 21 | 29 | 31 | 29 |
 | Singletons | 159 | 159 | 224 | 186 |
 | Total communities | 179 | 188 | 255 | 215 |
 
-### Cluster Distribution (V4)
+### Cluster distribution (V4)
 
 | Size | Count | Identity |
 |---|---|---|
-| 3,367 | 1 | Canary-adjacent botnet (ubuntu/3245gs5662d34) |
+| 3,367 | 1 | Canary-family botnet (ubuntu/3245gs5662d34) |
 | 393 | 1 | Admin/Admin botnet |
 | 379 | 1 | root/root botnet |
 | 197 | 1 | Debian-targeting botnet |
-| 161 | 1 | Unknown (signature: root/------fuck------) |
+| 161 | 1 | Unknown (root/------fuck------) |
 | 135 | 1 | HTTP/Chrome-UA scanner |
 | 34 | 1 | root/Abcd1234 cluster |
 | 25 | 1 | Go-http-client scanner |
 | 24 | 1 | SIP/VoIP scanner |
-| 17 | 1 | Raspberry Pi scanner (pi/raspberryraspberry993311) |
+| 17 | 1 | Raspberry Pi scanner |
 | 8 | 1 | TLS binary probe |
 | 7 | 1 | Perl exploit tool |
 | 7 | 1 | a/a cluster |
 | 3 | 1 | Ethereum miner |
-| 2 | 15 | Small pairs (crypto-miners, misc) |
+| 2 | 15 | Small credential-sharing pairs |
 | 1 | 186 | Singletons |
 | **Total** | **215** | |
 
 ### Graph
 
-600-node sample of the largest connected component. Colour = community.
+600-node sample of the largest connected component. Each dot is an attacker IP, each line connects two IPs that share credential pairs, and the colour shows which community they belong to.
 
 ![Attacker Similarity Graph](attacker_graph.png)
 
@@ -142,225 +150,205 @@ No stable threshold exists — IDF weighting is the correct fix.
 
 ## 4. Cluster Analysis
 
-**Community 0 — Canary-Adjacent Botnet (3,367 IPs)**
-Signature: `ubuntu/3245gs5662d34`. The largest cluster. In V4, the two most common canary credentials (`345gs5662d34/345gs5662d34` and `root/3245gs5662d34`) are removed as stopwords; the community is now identified by `ubuntu/3245gs5662d34`, a less frequent variant that survived filtering. The cluster is slightly larger than V3's 3,329 IPs, indicating the stopword removal did not fragment this botnet — the remaining canary-family credentials are still sufficient to hold the group together. The canary string is a deliberate operator fingerprint inserted to identify their bots in honeypot logs. Scale and technique indicate a professional threat actor.
+**Community 0 — Canary-Family Botnet (3,367 IPs)**
+
+This is the largest cluster. In V4, the two most common canary credentials (`345gs5662d34/345gs5662d34` and `root/3245gs5662d34`) were removed as stopwords, so the community is now identified by the signature `ubuntu/3245gs5662d34` — a less common variant of the same canary string that survived filtering. The cluster is slightly larger than V3's 3,329 IPs, which tells us that removing the most dominant canary credentials did not break the botnet apart. The remaining canary-family credentials are still enough to tie all these IPs together.
+
+The word "canary" refers to a deliberate fingerprint. The operator of this botnet inserted the string `3245gs5662d34` into their credential list specifically so that they could identify their own bots in honeypot logs. The scale — over 3,000 IPs — and the deliberate fingerprinting both suggest a professional threat actor, not an opportunistic attacker.
 
 ---
 
 **Community 1 — Admin/Admin Botnet (393 IPs)**
-Signature: `admin/admin`. Credential dictionary targets consumer routers, IP cameras, NAS devices, and single-board computers using factory-default credentials. Consistent with Mirai-style IoT scanning.
+
+Signature: `admin/admin`. This credential targets devices that still have their factory-default login — consumer routers, IP cameras, NAS boxes, and similar embedded hardware. This is consistent with Mirai-style scanning, where the goal is to build a botnet from insecure IoT devices rather than attacking servers directly.
 
 ---
 
-**Community 2 — root/root Botnet (377 IPs)**
-Signature: `root/root`. Targets Linux servers and embedded devices where the root account retains its default password. Overlaps in target profile with the Debian-targeting cluster but uses a distinct credential list.
+**Community 2 — root/root Botnet (379 IPs)**
+
+Signature: `root/root`. Targets Linux servers and embedded devices where the root account still has its default password. The target profile overlaps with the Debian-targeting cluster below, but the two groups use different credential lists, so they end up in separate communities.
 
 ---
 
-**Community 3 — Debian-Targeting Botnet (196 IPs)**
-Signature: `root/debian`. Targets Debian-based Linux servers with default root credentials (Debian, Ubuntu, Raspberry Pi OS).
+**Community 3 — Debian-Targeting Botnet (197 IPs)**
+
+Signature: `root/debian`. The password "debian" is the default root password on Debian-based Linux images, including Ubuntu and Raspberry Pi OS. This cluster specifically goes after machines built from those images without changing the defaults.
 
 ---
 
-**Communities 5 & 7 — HTTP/Go Scanner (135 + 25 IPs)**
-In V4 the V3 single HTTP/Go scanner community (160 IPs) splits into two distinct groups. Community 5 (135 IPs) uses a full Chrome-like User-Agent (`Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/537.36`), while Community 7 (25 IPs) uses the bare `User-Agent: Go-http-client/1.1` header. Both send HTTP headers as SSH credentials — not brute-force tools, but Go-based multi-protocol scanners probing port 22 for misconfigured HTTP servers or Redis instances. The stopword removal revealed that a common credential previously masked the difference between these two tool variants.
+**Community 4 — Unknown Botnet (161 IPs)**
+
+Signature: `root/------fuck------`. The unusual password string does not match any known tool fingerprint in public threat intelligence sources. The cluster behaviour is consistent with a botnet using a custom credential list.
+
+---
+
+**Community 5 — HTTP/Chrome-UA Scanner (135 IPs)**
+
+Signature: a full Chrome browser User-Agent string (`Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/537.36`). This is not a password — it is an HTTP header being sent as an SSH credential. These IPs are not trying to brute-force SSH at all; they are running a Go-based multi-protocol scanner that probes any open port for an HTTP server, Redis instance, or other non-SSH service. Port 22 just happens to be in their scan range.
+
+In V3, this group and Community 7 below were one cluster of 160 IPs. The stopword removal in V4 revealed that a shared common credential was masking the difference between two distinct tool variants.
+
+---
 
 **Community 6 — root/Abcd1234 Cluster (34 IPs)**
-Signature: `root/Abcd1234`. A cluster that emerges clearly in V4 after stopword removal. Targets Linux servers with a common "strong-looking but actually guessable" password pattern (capitalised word + digits + punctuation). Consistent with credential-stuffing tools using leaked-password dictionaries.
+
+Signature: `root/Abcd1234`. This cluster was not clearly visible in V3 — it appears after stopword removal. The password `Abcd1234` fits the pattern of "looks strong but is on every leaked-password list": mixed case, numbers, common word. This is consistent with a credential-stuffing tool that uses a dictionary built from real data breaches.
 
 ---
 
-**Community 7 — SIP/VoIP Scanner (24 IPs)**
-Signature: `OPTIONS sip:nm SIP/2.0` / `Via: SIP/2.0/TCP nm;branch=foo`. All 24 IPs send the same 7-line SIP OPTIONS request. Target: VoIP PBX systems for toll fraud.
+**Community 7 — Go-http-client Scanner (25 IPs)**
+
+Signature: `User-Agent: Go-http-client/1.1`. The bare Go HTTP client header, as opposed to the spoofed Chrome UA in Community 5. Same behaviour — HTTP headers sent as SSH credentials — but a different tool or configuration. The split from V3's single HTTP scanner community suggests these are two different operators running similar but distinct software.
 
 ---
 
-**Community 8 — Raspberry Pi Scanner (17 IPs)**
-Signature: `pi/raspberryraspberry993311`. Targets Raspberry Pi devices that have not changed the default `pi` user password. The doubled password string (`raspberry` × 2 + digits) matches a known default credential for early Raspberry Pi OS images.
+**Community 8 — SIP/VoIP Scanner (24 IPs)**
+
+Signature: `OPTIONS sip:nm SIP/2.0` and `Via: SIP/2.0/TCP nm;branch=foo`. All 24 IPs send exactly the same SIP OPTIONS request — the standard probe used to check whether a VoIP system is running. SIP is the protocol used by PBX phone systems, and compromising one allows attackers to make calls at the victim's expense (toll fraud). Like the HTTP scanners, these IPs are not actually trying to attack SSH; they are probing for a completely different service on the same port.
 
 ---
 
-**Community 9 — TLS Binary Probe (8 IPs)**
-Signature: Raw TLS ClientHello bytes (`\x16\x03\x03`). Probing port 22 for services accidentally running TLS (HTTPS, LDAPS).
+**Community 9 — Raspberry Pi Scanner (17 IPs)**
+
+Signature: `pi/raspberryraspberry993311`. This targets Raspberry Pi devices that still use the default `pi` user account. The password is `raspberry` repeated twice with digits appended — a known default from early Raspberry Pi OS images. All 17 IPs in this cluster are running the same specific tool.
 
 ---
 
-**Community 10 — Perl Exploit Tool (7 IPs)**
-Signature: `perl/warning` (IDF = 6.563). All 7 IPs try exactly this one pair. Fingerprint of a specific Perl-based exploit tool.
+**Community 10 — TLS Binary Probe (8 IPs)**
+
+Signature: raw bytes that start with `\x16\x03\x03` — the beginning of a TLS ClientHello handshake. These IPs are checking whether port 22 is accidentally running a TLS-based service (HTTPS, LDAPS, etc.) instead of SSH. Again, not an SSH attack at all.
 
 ---
 
-**Community 12 — Ethereum Miner (3 IPs)**
-Signature: `eth/ethereum12345`. Attempting to install Ethereum mining software on compromised servers.
+**Community 12 — Perl Exploit Tool (7 IPs)**
+
+Signature: `perl/warning` (IDF = 6.563). All 7 IPs try exactly this one credential pair and nothing else. `perl/warning` is a known fingerprint of a specific Perl-based exploit tool. The IDF score of 6.563 is very high, meaning this pair is extremely rare across the dataset — it is a reliable cluster identifier.
 
 ---
 
-**Small pairs — 18 clusters × 2 IPs**
-Crypto-miner usernames (`xmr`, `bitcoin`, `eth`, `wallet`) and miscellaneous pairs. Monero dominates: CPU-efficient RandomX mining and untraceable transactions make it the standard for illicit crypto-mining.
+**Community 11 — a/a Cluster (7 IPs)**
+
+Signature: `a/a`. A minimal brute-force tool trying the simplest possible credentials.
 
 ---
 
-## 5. Threat Intelligence
+**Community 13 — Ethereum Miner (3 IPs)**
 
-**Canary credential = professional operator.** `345gs5662d34` across 3,329 IPs is not accidental. The operator inserted it deliberately to fingerprint their fleet. Scale and technique rule out opportunistic actors.
+Signature: `eth/ethereum12345`. These IPs are trying to gain access so they can install Ethereum mining software on the compromised server.
 
-**Port 22 captures non-SSH traffic.** HTTP scanners (160 IPs), SIP scanners (24 IPs), and TLS probers (8 IPs) were all captured. Attackers scan all open ports for any exploitable service.
+---
 
-**Crypto-mining is the primary motive.** At least 16 communities show explicit mining intent. Monero is preferred universally.
+**Small pairs (15 clusters of 2 IPs)**
 
-**IoT default credentials dominate.** The largest cluster (856 IPs) targets `admin/admin`, `root/debian`, `orangepi/orangepi` — factory defaults on routers, cameras, and embedded devices.
+The remaining multi-IP clusters are all pairs of two IPs sharing a single rare credential. Most involve crypto-miner-related usernames (`xmr`, `bitcoin`, `eth`, `wallet`). Monero (`xmr`) appears more often than others — it uses a CPU-friendly mining algorithm (RandomX) and its transactions are untraceable, which makes it the standard choice for illicit mining operations.
 
-**Singletons are not lone attackers.** 159 IPs with no shared credentials may be low-activity bots, unique-wordlist operators (specifically designed to defeat clustering), researchers, or other honeypots.
+---
+
+## 5. Findings
+
+**The canary credential is a professional fingerprint.** The string `3245gs5662d34` appearing across more than 3,000 IPs is not an accident. The botnet operator deliberately put it in their credential list as a tag to identify their bots in exactly this kind of log. The scale rules out any amateur operation.
+
+**Port 22 captures a lot of non-SSH traffic.** The HTTP scanners (135 + 25 IPs), the SIP scanner (24 IPs), and the TLS prober (8 IPs) are all sending non-SSH content. Attackers scan all open ports for whatever service might be running, regardless of what port number convention says it should be.
+
+**Crypto-mining is the most common motive.** At least 16 communities show clear mining intent in their credentials. Monero is preferred throughout.
+
+**IoT default credentials are a major attack surface.** The admin/admin, root/root, and root/debian clusters together account for nearly 970 IPs specifically targeting devices with default factory credentials.
+
+**Singletons are not necessarily lone attackers.** The 186 IPs with no shared credentials after filtering might be low-activity bots, operators running unique wordlists specifically to defeat credential-based clustering, security researchers, or other honeypots.
 
 ---
 
 ## 6. Defensive Indicators
 
-| Indicator | Action |
+| Indicator | Recommended action |
 |---|---|
-| SSH username or password = `345gs5662d34` | Block immediately — confirmed botnet traffic |
-| SIP headers in SSH credentials | Block + alert — VoIP fraud scanner |
-| `admin/admin`, `root/debian`, `orangepi/orangepi` | Enforce credential policy on all devices |
-| Usernames `xmr`, `bitcoin`, `eth`, `wallet` | Alert — probable crypto-miner deployment |
-| Go HTTP client User-Agent on port 22 | Block at firewall |
+| SSH credential contains `3245gs5662d34` | Block immediately — confirmed botnet traffic |
+| SIP headers appearing as SSH credentials | Block and alert — VoIP fraud scanner |
+| `admin/admin` or `root/debian` login attempts | Audit and enforce credential policies on all devices |
+| Usernames `xmr`, `bitcoin`, `eth`, `wallet` | Alert — likely crypto-mining deployment attempt |
+| HTTP User-Agent strings in SSH credentials | Block at firewall — multi-protocol scanner |
 
 ---
 
-## 7. Next Steps
+## 7. Possible Next Steps
 
-- **GeoIP enrichment:** map sub-clusters geographically — are the canary sub-clusters from distinct regions?
-- **Timestamp analysis:** if available, correlate attack timing across clusters.
-- **Multi-honeypot correlation:** combining logs from multiple sensors dramatically improves cluster resolution.
+- **GeoIP enrichment**: map the clusters geographically. Are the canary sub-clusters coming from distinct regions, or is it a globally distributed botnet?
+- **Timestamp analysis**: if timestamps are available, check whether cluster members attack in coordinated waves or independently.
+- **Multi-honeypot correlation**: data from multiple honeypots would dramatically improve cluster resolution, since rare shared credentials become even stronger signals across larger IP populations.
 
 ---
 
 ## 8. Output Files
 
-| File | Description |
+| File | Contents |
 |---|---|
-| `cluster_attackers.py` | Analysis script (V4, cosine similarity + Leiden + stopword removal) |
-| `cluster_results.csv` | Every IP with community ID, cluster size, signature credential |
-| `attacker_graph.png` | Graph visualisation (600-node sample) |
+| `cluster_attackers.py` | The analysis script (V4) |
+| `cluster_results.csv` | Every IP with its community ID, cluster size, and signature credential |
+| `attacker_graph.png` | Graph visualisation (600-node sample of the largest component) |
 | `cowrie_ip_username_pass_anon.csv` | Raw honeypot data |
 
 ---
 
-## 9. Algorithm Deep Dive
+## 9. How the Algorithms Work
 
-### 9.0 Vocabulary Filtering: Stopword Removal (V4)
+This section explains each algorithm in detail, including the maths. It is meant to be self-contained — you should not need to look anything up to follow it.
 
-#### The problem: why IDF down-weighting is not enough
+### 9.0 Why IDF alone is not enough (the stopword problem)
 
-The original IDF formula assigns the canary credential (`345gs5662d34/345gs5662d34`, used by 2,791 IPs) a score of 0.578. This is much lower than rarer credentials, but it does not eliminate the canary's effect on cosine similarity.
+This is the main theoretical contribution of V4, so it is worth explaining carefully.
 
-Cosine similarity between IPs $a$ and $b$ after L2 normalisation is:
+After V3, the largest cluster was 3,329 IPs all linked by the canary credential `345gs5662d34/345gs5662d34`. That credential was used by 56% of all IPs, which gave it an IDF of only 0.578. You might expect that such a low score would make it irrelevant — but it does not, because of how cosine similarity works after normalisation.
 
-$$\cos(\hat{\mathbf{v}}_a, \hat{\mathbf{v}}_b) = \hat{\mathbf{v}}_a \cdot \hat{\mathbf{v}}_b$$
+When we compute cosine similarity, we first divide each IP's vector by its length (this is called L2 normalisation). The problem is that the canary credential contributes 0.578 to the vector of every IP that tried it, and it contributes 0.578² = 0.334 to that IP's squared length. For an IP that mostly used the canary credential and not many others, this means the canary makes up a large fraction of the vector's total length. After dividing by the length, the canary's contribution gets *re-inflated* — it ends up close to 1 for IPs that have little else in their vectors.
 
-where $\hat{\mathbf{v}}_i = \mathbf{v}_i / \|\mathbf{v}_i\|$. The canary contributes $\text{IDF}(\text{canary}) = 0.578$ to dimension $p_\text{canary}$ of the raw vector, and $0.578^2 = 0.334$ to the squared norm $\|\mathbf{v}_i\|^2$. After normalisation, the canary dimension gets re-weighted relative to the other dimensions:
+Two IPs that both mostly used the canary credential end up with a cosine similarity close to 1, regardless of their other credentials. The only way to fix this completely is to remove the canary from the vector space entirely. If it has no dimension, it cannot affect any cosine calculation at all.
 
-$$\hat{v}_i[p_\text{canary}] = \frac{0.578}{\|\mathbf{v}_i\|}$$
+The same logic applies to the other two stopwords (`root/3245gs5662d34` at 33% and `root/@qwer2025` at 16%).
 
-For an IP whose credential profile is dominated by the canary, $\|\mathbf{v}_i\|$ is small and $\hat{v}_i[p_\text{canary}]$ is close to 1 — the L2 normalisation re-inflates the canary's influence. Two IPs that mostly used the canary credential end up with cosine similarity near 1 regardless of their other credentials.
+Formally, the V4 vocabulary keeps pair $p$ only if:
 
-The only complete fix is to remove the canary dimension from the vector space. With no canary dimension, no cosine similarity between any pair of IPs can include a canary contribution.
+$$\text{MIN\_DF} \leq df_p \leq \lfloor\text{MAX\_DF\_FRACTION} \times N\rfloor$$
 
-#### The vocabulary filter
+With N = 4,973, MAX\_DF\_FRACTION = 0.10, and MIN\_DF = 2, this means keeping pairs used by between 2 and 497 IPs.
 
-Two thresholds are applied before IDF is computed:
-
-$$\text{keep pair } p \iff \text{MIN\_DF} \leq df_p \leq \lfloor\text{MAX\_DF\_FRACTION} \times N\rfloor$$
-
-With $N = 4{,}973$, `MAX_DF_FRACTION = 0.10`, `MIN_DF = 2`:
-
-| Threshold | Value | Drops |
+| Filter | Value | What gets dropped |
 |---|---|---|
-| Upper bound | $df_p \leq 497$ | Credentials used by >10% of IPs (stopwords) |
-| Lower bound | $df_p \geq 2$ | Credentials only one IP ever tried (singletons) |
+| Upper bound (stopwords) | df ≤ 497 | Credentials used by >10% of IPs |
+| Lower bound (singletons) | df ≥ 2 | Credentials used by exactly one IP |
 
-**Stopwords** ($df_p > 497$) are credentials so common across the dataset that sharing them carries no discriminating signal. In information retrieval, words like "the" or "and" that appear in every document are removed from the index for exactly this reason. Three stopwords were identified: `345gs5662d34/345gs5662d34` (df=2,791), `root/3245gs5662d34` (df=1,658), and `root/@qwer2025` (df=799).
+For singletons: a credential only one IP ever tried has a zero value in every other IP's vector. It cannot create an edge between any two IPs. It also inflates the vector length of the one IP that tried it, weakening that IP's similarity with its genuine botnet peers. There is no reason to keep it.
 
-**Singletons** ($df_p = 1$) appear in exactly one IP's vector. Their inner product with any other IP's vector is necessarily zero — they cannot contribute to any edge. They inflate the L2 norm of the single IP that tried them, weakening that IP's cosine similarity with its genuine botnet peers. Removing them makes the remaining vector directions more informative.
+An IP whose entire credential set is stopwords and singletons ends up with an all-zero TF-IDF vector. Its cosine similarity with every other IP is 0, it forms no edges, and it becomes an isolated node (singleton community). This is the correct outcome: if the only thing an IP did was try credentials that are universal or unique, we have no evidence about which botnet it belongs to.
 
-#### IDF after filtering
-
-IDF is computed only on the surviving pairs:
-
-$$\text{IDF}(p) = \log\!\left(\frac{N}{df_p}\right), \quad 2 \leq df_p \leq 497$$
-
-The minimum IDF in the filtered vocabulary is $\log(4973/497) \approx 2.30$. Every retained credential is at least moderately discriminating — the near-zero-IDF stopwords have been removed entirely. The maximum IDF is unchanged at $\log(4973/2) \approx 7.82$ for credentials used by exactly two IPs.
-
-#### Effect on IPs with fully-filtered credential sets
-
-An IP whose entire credential set consists of stopwords and singletons ends up with an all-zero TF-IDF vector. The safe division:
-
-$$\text{inv}_i = \begin{cases} 1/\|\mathbf{v}_i\| & \text{if } \|\mathbf{v}_i\| > 0 \\ 0 & \text{otherwise} \end{cases}$$
-
-gives this IP a zero normalised row. Its cosine with every other IP is 0, no edges are formed, and it becomes a singleton community. This is correct: an IP whose only activity was using universal credentials provides no evidence of botnet membership with any specific group.
-
-#### Why this is the textbook approach
-
-Stopword removal is a foundational technique in information retrieval, described in Manning, Raghavan & Schütze (2008) and applied identically in search engines. The analogy is exact: credential pairs are terms, attacker IPs are documents, botnets are document clusters. Terms appearing in the majority of documents are removed from the index before similarity is computed because their high frequency in the index makes them noise rather than signal. V4 applies this standard technique to credential clustering.
+This technique — removing very common and very rare terms before computing similarity — is the standard approach in text search and is described in Manning, Raghavan & Schütze (2008). V4 applies it directly to credential data.
 
 ---
 
-### 9.1 IDF: Measuring Credential Rarity
+### 9.1 TF-IDF vectors
 
-The core difficulty in this analysis is that some credential pairs appear across the vast majority of attacker IPs while others are nearly unique. Naive similarity measures that treat all shared credentials equally collapse the dataset into a handful of enormous, meaningless clusters — V1's central failure.
-
-IDF (Inverse Document Frequency) is borrowed from information retrieval, where the same problem has been solved for decades. In text search, a word like "the" appears in every document and tells you nothing about which documents are similar; a word like "photosynthesis" appearing in two documents is a meaningful signal that they are related. The same reasoning applies here: two IPs both trying `345gs5662d34/345gs5662d34` (used by 56% of the dataset) is effectively noise, while two IPs both trying `perl/warning` (used by 7 IPs total) is strong evidence of shared attack software.
-
-$$\text{IDF}(p) = \log\!\left(\frac{N}{df_p}\right)$$
-
-$N$ = total unique IPs (4,973), $df_p$ = number of IPs that tried pair $p$.
-
-**Why the logarithm?**
-
-Without it the scale becomes unworkable. The most common pair ($df = 2791$) gives $N/df \approx 1.78$; a moderately rare pair ($df = 50$) gives $N/df \approx 99.5$. On a linear scale those two values sit 56× apart, meaning a small number of semi-rare credentials would completely dominate any similarity calculation. The logarithm compresses the range into something useful:
-
-| Credential pair | $df$ | $N/df$ | IDF |
-|---|---|---|---|
-| `345gs5662d34/345gs5662d34` | 2791 | 1.78 | 0.578 |
-| `admin/admin` | 452 | 11.0 | 2.398 |
-| `root/debian` | 184 | 27.0 | 3.298 |
-| `perl/warning` | 7 | 710.4 | 6.563 |
-| any unique pair | 1 | 4973 | 8.512 |
-
-The log also has clean boundary behaviour. A pair used by every IP gets $\log(1) = 0$ — it is mathematically worthless for grouping. A pair used by exactly one IP gets the maximum value $\log(N)$. IDF values naturally live in $[0, \log N]$ with no manual tuning required.
-
----
-
-### 9.2 TF-IDF Vectors
-
-Once IDF scores are computed, each IP is represented as a sparse vector in a 40,474-dimensional credential space — one dimension per unique credential pair observed across the entire dataset:
+Each IP is represented as a vector. Think of it as a long list of numbers, one per credential pair in the vocabulary. If IP_42 tried a credential, the corresponding position in the vector holds that credential's IDF score. If it did not try it, the position is 0.
 
 $$\mathbf{v}_i[p] = \begin{cases} \text{IDF}(p) & \text{if IP}_i \text{ tried pair } p \\ 0 & \text{otherwise} \end{cases}$$
 
-The TF (Term Frequency) component here is binary: did the IP try this credential pair at all? Retry counts are discarded. What identifies a botnet is the pattern of which credentials are attempted, not how many connection attempts were logged — a high-volume bot and a low-volume bot running the same software should look identical.
+The TF (Term Frequency) part is just a binary yes/no: did this IP try this credential at all? We do not count retries, because what identifies a botnet is *which* credentials were tried, not *how many times* they were tried. A high-volume bot and a low-volume bot running the same software should produce the same vector shape.
 
-The vectors are very sparse. A typical IP tries 50–200 credential pairs out of 40,474, so more than 99% of each vector is zero. This is what makes matrix multiplication in Section 9.4 tractable rather than prohibitively expensive.
-
-Two IPs running the same attack software against the same wordlist will have nearly identical vectors. Two IPs from different botnets with different credential dictionaries will have vectors pointing in almost perpendicular directions in credential space.
+In practice, each IP typically tries 50–200 credential pairs out of 40,474, so more than 99% of each vector is zeros. This is called a sparse vector. Sparsity matters because it makes the matrix computations in Section 9.4 fast — the computer can skip all the zeros.
 
 ---
 
-### 9.3 Cosine Similarity
+### 9.2 Cosine similarity
 
-The similarity between two IPs is the cosine of the angle between their credential vectors:
+Once each IP has a TF-IDF vector, we need a way to measure how similar two IPs are. The tool we use is cosine similarity:
 
 $$\cos(\mathbf{v}_a, \mathbf{v}_b) = \frac{\mathbf{v}_a \cdot \mathbf{v}_b}{\|\mathbf{v}_a\| \cdot \|\mathbf{v}_b\|}$$
 
-**Geometric interpretation.** Any two vectors in $\mathbb{R}^{40474}$ define an angle $\theta$ between them. When $\theta = 0°$ the vectors are parallel — identical credential profiles — and $\cos\theta = 1$. When $\theta = 90°$ they are orthogonal — no shared credentials whatsoever — and $\cos\theta = 0$. The cosine is a natural measure of directional similarity that is independent of vector length.
+The numerator is the dot product — it sums up IDF² for every credential pair that both IPs tried. The denominator is the product of the two vector lengths, which normalises the result so it always falls between 0 and 1.
 
-**Why this improves on V2.** V2 used the raw dot product ($\sum_p \text{IDF}(p)$ over shared pairs) as edge weight. An IP that tried 10,000 credentials accumulates a large dot product with almost everyone just from sheer volume — not because its credential list resembles theirs. Dividing by both magnitudes removes this: after normalisation, only the direction of the vector matters, not its length. A bot that tried 10,000 credentials and a bot that tried 50 are compared on equal footing.
+Geometrically: two vectors in high-dimensional space define an angle between them. Cosine similarity is literally the cosine of that angle. If two IPs have identical credential profiles their vectors point in the same direction (angle = 0°, cosine = 1). If they share no credentials at all their vectors are perpendicular (angle = 90°, cosine = 0).
 
-**Expanding the dot product:**
+The key reason to use cosine similarity rather than the raw dot product (which was V2's approach) is that it is not affected by vector length. An IP that tried 10,000 credentials accumulates a large dot product with almost everyone just from volume, not because its credential list resembles theirs. Dividing by both lengths removes that bias. After normalisation, we are only comparing the *shape* of the credential profiles, not how many credentials each IP tried.
 
-$$\mathbf{v}_a \cdot \mathbf{v}_b = \sum_{p \,\in\, \text{shared}} \text{IDF}(p)^2$$
-
-IDF appears squared in the numerator but only once (via the square root) in each norm. The net effect is that rare shared credentials contribute more to the similarity than common ones — which is precisely the behaviour needed.
-
-**Worked example:**
+Here is a worked example:
 
 ```
 IP_A tried: root/123456 (IDF=3.634) + perl/warning (IDF=6.563) + admin/admin (IDF=2.398)
@@ -373,98 +361,89 @@ dot(A,B) = 3.634² + 6.563² = 13.21 + 43.07 = 56.28
 cos(A,B) = 56.28 / (7.877 × 7.502) = 0.952
 ```
 
-The shared rare pair (`perl/warning`, IDF=6.563) drives the similarity to 0.952. V2 would assign these IPs an edge weight of 10.197 (raw IDF sum) with no way to distinguish this from two IPs sharing five common credentials that happen to sum to the same value.
+The shared rare pair `perl/warning` (IDF = 6.563) is doing most of the work here, because IDF appears squared in the numerator but only once in each norm — so rare shared pairs have an outsized effect on the final score, which is exactly what we want.
 
 ---
 
-### 9.4 Efficient Computation via Sparse Matrix Multiplication
+### 9.3 Building the graph efficiently
 
-Computing pairwise cosine similarities one pair at a time is not feasible. The canary credential alone ($df = 2791$) would require $\binom{2791}{2} \approx 3.9 \times 10^6$ iterations just to process the pairs formed through that one credential. Across all 40,474 credentials, the total is $O\!\left(\sum_p \binom{df_p}{2}\right)$, which runs into hundreds of millions of iterations.
+After computing cosine similarities, we build a graph where each IP is a node and two IPs are connected by an edge if their cosine similarity is at least 0.10. Then community detection finds the densely connected groups.
 
-Instead, the entire similarity matrix is computed in three steps using scipy.sparse:
+The naive approach — computing each pair of IPs one at a time — would not be feasible. There are 4,973 IPs, so there are about 12.4 million pairs, and for each pair we would need to iterate over shared credentials. For the canary credential alone (used by 2,791 IPs), there are about 3.9 million pairs to process just for that one credential.
 
-**Step 1 — Build $M$.**
+Instead, the whole similarity matrix is computed in one step using matrix multiplication. We build a matrix M where rows are IPs and columns are credential pairs, filled with IDF scores. We normalise each row (divide by its length). Then we multiply M by its own transpose:
 
-$$M \in \mathbb{R}^{4973 \times 40474}, \quad M[i,p] = \text{IDF}(p) \text{ if IP}_i \text{ tried } p, \text{ else } 0$$
+$$S = \hat{M} \cdot \hat{M}^\top$$
 
-Stored in CSR (Compressed Sparse Row) format, which records only the non-zero values and their column indices. With roughly 200 credentials per IP on average, $M$ contains about 1M non-zero entries out of a possible 201M — under 0.5% density.
+The entry at position (i, j) in S is the dot product of the normalised row for IP i and the normalised row for IP j — which is exactly the cosine similarity between those two IPs. The whole thing runs as a single optimised matrix operation using scipy.sparse, which is much faster than any loop.
 
-**Step 2 — Row-normalise $M$.**
-
-$$\hat{M}[i,\,\cdot\,] = \frac{M[i,\,\cdot\,]}{\|M[i,\,\cdot\,]\|_2}$$
-
-Dividing each row by its L2 norm produces unit-length rows. Any IP with a zero vector (no credentials at all, which cannot occur in practice) is assigned norm 1 to avoid a division by zero.
-
-**Step 3 — Compute $S = \hat{M}\hat{M}^\top$.**
-
-$$S[i,j] = \hat{M}[i,\,\cdot\,] \cdot \hat{M}[j,\,\cdot\,] = \cos(\mathbf{v}_i, \mathbf{v}_j)$$
-
-The $(i,j)$ entry of $S$ is the dot product of two unit-length rows — exactly the cosine similarity between IPs $i$ and $j$. scipy.sparse executes this as a single call into optimised BLAS/C code. Only the upper triangle is extracted (to avoid storing each pair twice), and entries below the threshold MIN_COSINE_SIM = 0.10 are discarded before the graph is constructed.
+Because M is very sparse (under 0.5% of entries are non-zero), scipy.sparse can store it efficiently and multiply it quickly without processing all the zeros.
 
 ---
 
-### 9.5 Modularity
+### 9.4 Modularity — what community detection is actually optimising
 
-The Leiden algorithm, like its predecessor Louvain, optimises modularity $Q$:
+Community detection algorithms search for a partition of the graph into groups. But "partition" is vague — how do we know if one partition is better than another? The answer is modularity, written as Q.
 
-$$Q = \frac{1}{2m}\sum_{i,j}\!\left[w_{ij} - \frac{k_i\,k_j}{2m}\right]\delta(c_i,\,c_j)$$
+$$Q = \frac{1}{2m}\sum_{i,j}\left[w_{ij} - \frac{k_i k_j}{2m}\right]\delta(c_i, c_j)$$
+
+This looks complicated but the idea is simple. For every pair of IPs that end up in the same community, we compare the actual edge weight between them (`w_ij`) to the edge weight we would expect if the graph were random. If the actual weight is higher than expected, that pair contributes positively to Q. If it is lower, it contributes negatively.
 
 | Symbol | Meaning |
 |---|---|
-| $m$ | Total edge weight summed across all edges in the graph |
-| $w_{ij}$ | Cosine similarity between IPs $i$ and $j$ (0 if no edge exists) |
-| $k_i$ | Weighted degree of IP $i$: sum of all its edge weights |
-| $k_i k_j / 2m$ | Expected edge weight under the Configuration Model null |
-| $\delta(c_i, c_j)$ | 1 if $i$ and $j$ are in the same community, 0 otherwise |
+| m | Total of all edge weights in the graph |
+| w_ij | Cosine similarity between IPs i and j (0 if no edge) |
+| k_i | Sum of all edge weights attached to IP i |
+| k_i × k_j / 2m | Expected edge weight if connections were random |
+| δ(c_i, c_j) | 1 if i and j are in the same community, 0 otherwise |
 
-**The null model.** The term $\frac{k_i k_j}{2m}$ comes from the Configuration Model — a random graph that preserves each node's degree sequence but randomises which nodes are connected. Modularity asks: are these two nodes connected more than we would expect if edges were assigned randomly among nodes with these degrees? A positive contribution to $Q$ means yes.
+The "expected weight if random" term comes from a model called the Configuration Model, which asks: if we kept each IP's total connection strength the same but shuffled who is connected to whom, what weight would we expect between these two IPs? A good community has much higher internal connectivity than this random baseline.
 
-Summing over all within-community pairs gives a single scalar $Q \in (-1, 1)$ that measures how much more densely internal than external a partition is. In practice, well-clustered real networks reach $Q \approx 0.3$–$0.7$; a random partition scores near 0.
+Q ends up between -1 and 1. In practice, real networks with clear community structure score around 0.3 to 0.7. A random partition scores near 0.
 
-**Resolution limit.** A theoretical limitation of modularity is that communities smaller than $\sqrt{2m}$ may be merged into larger neighbours to increase $Q$ even if they represent genuinely separate groups. This is an intrinsic property of the modularity function rather than any implementation bug. The resolution parameter $\gamma = 1.0$ keeps Leiden at the standard modularity definition; values above 1.0 favour smaller, tighter communities.
-
----
-
-### 9.6 Leiden Algorithm
-
-The Leiden algorithm (Traag, Waltman & van Eck, 2019) operates in three phases that iterate until the partition no longer changes.
-
-**Phase 1 — Local node moving.** Each node is individually considered for reassignment to a neighbouring community. The node moves to whichever community produces the largest increase in $Q$. Nodes are processed in random order and the phase repeats until no single move improves $Q$. This is fast and produces a good initial partition, but it can leave communities internally disconnected: a node may end up in a community with no direct edge path to some of its fellow members within that community. Louvain stops here, which is why disconnected communities are possible in its output.
-
-**Phase 2 — Refinement.** Before aggregating communities into super-nodes, Leiden checks each community for internal connectivity. Any subset of nodes not reachable from the rest of its community is split into a new community. This refinement phase enforces the $\gamma$-separation criterion: every community must have sufficient internal edge weight relative to its connections to the rest of the graph. Communities failing this check are broken apart until all pass. This step is Leiden's core contribution and the reason it guarantees well-connected output communities where Louvain does not.
-
-**Phase 3 — Aggregation.** Each community is collapsed into a single super-node. Edges between super-nodes carry the sum of all crossing edge weights. Phases 1 and 2 then run again on this coarser graph. The multilevel structure allows communities to be detected at different scales without being locked into the resolution of any single pass.
-
-The three phases repeat until the partition is stable. Because Phase 1 processes nodes in random order, results depend on the random seed; `seed=42` is fixed throughout to ensure reproducibility.
+One known limitation: modularity can sometimes merge small but genuine communities into a larger neighbour if doing so increases Q. This is a property of the formula itself, not a bug in any implementation.
 
 ---
 
-### 9.7 V2 vs V3 Summary
+### 9.5 Leiden algorithm
+
+Leiden (Traag, Waltman & van Eck, 2019) is the algorithm we use to maximise modularity. It works in three phases that repeat until the partition stops changing.
+
+**Phase 1 — Move nodes.** Each IP is considered for reassignment to a neighbouring community. It moves to whichever community gives the biggest increase in Q. This repeats in random order until no single move would improve Q anymore. This phase is fast and gets a good initial partition, but it can sometimes create communities that are internally disconnected — a node might get assigned to a community with no path back to most of its members.
+
+**Phase 2 — Fix disconnected communities.** Before collapsing anything, Leiden checks every community for internal connectivity. Any part of a community that is not reachable from the rest is split off into its own new community. This is the main improvement over the older Louvain algorithm, which can leave disconnected communities in its output.
+
+**Phase 3 — Collapse and repeat.** Each community is collapsed into a single super-node, with edges between super-nodes carrying the total weight of all connections between the original communities. Then Phases 1 and 2 run again on this smaller, coarser graph. This allows the algorithm to find structure at multiple scales.
+
+These three phases repeat until the partition is stable. Because Phase 1 processes nodes in random order, the results can vary between runs, so we fix `seed=42` to make them reproducible.
+
+The previous versions (V2 and V3) used Louvain instead of Leiden. Louvain only does Phases 1 and 3 — it skips the connectivity check. Leiden is strictly better for this reason.
+
+---
+
+### 9.6 What changed between versions
+
+**V1 → V2:** Replaced raw shared-pair count with IDF-weighted sum as the edge weight. This fixed the mega-clusters caused by the canary credential.
+
+**V2 → V3:** Replaced the IDF sum with cosine similarity (adds L2 normalisation, removes the volume bias). Switched from Louvain to Leiden. Also replaced the itertools-based pair loop with sparse matrix multiplication, which made the computation practical for the full dataset.
 
 | Aspect | V2 | V3 |
 |---|---|---|
-| Edge weight | $\sum_p \text{IDF}(p)$ (raw IDF sum) | $\cos(\mathbf{v}_a, \mathbf{v}_b)$ (normalised) |
-| Volume bias | Yes — high-volume IPs inflate all weights | No — L2 normalisation removes it |
-| Graph construction | `itertools.combinations`, O(k²) per pair | Sparse matrix multiply, one vectorised call |
-| Community algorithm | Louvain — disconnected communities possible | Leiden — connectivity guaranteed by refinement |
-| Threshold | Raw IDF sum ≥ 1.0 | Cosine similarity ≥ 0.10 |
+| Edge weight | Sum of IDF scores for shared pairs | Cosine similarity (normalised) |
+| Volume bias | Yes — IPs that tried more credentials got larger edge weights | No — L2 normalisation removes this |
+| Speed | Slow O(k²) loop per credential pair | Fast matrix multiply |
+| Community algorithm | Louvain | Leiden |
 
----
-
-### 9.8 V3 vs V4 Summary
-
-The key change from V3 to V4 is vocabulary filtering. Everything else — cosine similarity, sparse matrix computation, Leiden with plain modularity — is identical.
+**V3 → V4:** Added vocabulary filtering (stopwords + singletons). Everything else is the same.
 
 | Aspect | V3 | V4 |
 |---|---|---|
-| Vocabulary | All 40,474 credential pairs | Pairs with $2 \leq df \leq 497$ only |
-| Stopwords | Retained (IDF=0.578, partial influence via norm) | Removed — zero dimensions in all vectors |
-| Singletons | Retained (inflate norms, no edge contribution) | Removed |
-| IDF minimum | 0.578 (canary pair) | 2.398 (admin/admin, pairs at 10% cutoff) |
-| Canary effect | Cosine partially re-inflated after L2 normalisation | Zero — canary has no dimension in any vector |
-| IPs with all-zero rows | Cannot occur (every IP tried something) | Possible (IPs whose credentials are all stopwords or singletons) |
-| Zero-row handling | Divide-by-one fallback | Safe divide: inv=0 keeps row zero |
-| Leiden partition | `RBConfigurationVertexPartition`, resolution=1.0 | `ModularityVertexPartition`, no resolution parameter |
-| Signature credential | Highest IDF-sum pair across all vocabulary | Most-shared pair in kept vocabulary, IDF tiebreak |
+| Vocabulary | All 40,474 credential pairs | 25,146 pairs with 2 ≤ df ≤ 497 |
+| Stopwords | Kept (low IDF, but still affect cosine via norms) | Removed entirely — no dimension in any vector |
+| Singletons | Kept (inflate norms, no edge contribution) | Removed |
+| IDF minimum | 0.578 (canary pair) | 2.398 (admin/admin) |
+| Canary effect on similarity | Partially re-inflated after normalisation | Zero |
+| IPs with all-zero vectors | Cannot happen | Possible — becomes an isolated singleton |
+| Leiden partition type | RBConfigurationVertexPartition (resolution=1.0) | ModularityVertexPartition (plain modularity) |
 
-**Why the Leiden variant changed.** V3 used `RBConfigurationVertexPartition` (the resolution-parameter variant of modularity). V4 uses `ModularityVertexPartition` (plain modularity, $\gamma = 1$). Both maximise the same objective at $\gamma = 1$; the change makes the algorithm choice explicit and removes the resolution parameter as a variable that could mask or amplify the stopword-removal effect.
+The Leiden variant changed because RBConfigurationVertexPartition and ModularityVertexPartition are equivalent at resolution=1.0, but the plain modularity version makes the choice explicit and removes the resolution parameter as something that could interact with the stopword-removal effect.
