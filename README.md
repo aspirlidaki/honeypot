@@ -1,6 +1,6 @@
 # Botnet Discovery from SSH Honeypot Logs
 
-This project tries to identify botnets from Cowrie SSH honeypot data by clustering attacker IP addresses based on the username/password pairs they attempt. The idea is simple: bots in the same botnet run the same software with the same credential list, so if two IPs try the same rare pairs, they are probably from the same botnet.
+This project tries to identify botnets from Cowrie SSH honeypot data by clustering attacker IP addresses based on the username/password pairs they attempt. The idea : bots in the same botnet run the same software with the same credential list, so if two IPs try the same rare pairs, they are probably from the same botnet.
 
 ## Dataset
 
@@ -8,9 +8,9 @@ The data comes from a Cowrie SSH honeypot operated by FORTH / C-SOC. It contains
 
 ## Method
 
-Each attacker IP is turned into a TF-IDF vector where each dimension corresponds to a credential pair. The IDF score for a pair is `log(N / df)`, where N is the total number of IPs and df is how many IPs tried that pair — so rare pairs get a high score and common pairs get a low one.
+Each attacker IP is turned into a TF-IDF vector where each dimension corresponds to a credential pair. The IDF score for a pair is `log(N / df)`, where N is the total number of IPs and df is how many IPs tried that pair , so rare pairs get a high score and common pairs get a low one.
 
-Before computing IDF, two types of credential are removed from the vocabulary. First, credentials used by more than 10% of all IPs are treated as stopwords and dropped entirely. These are so common that sharing them tells you nothing about botnet membership, and because of how L2 normalisation works, IDF alone is not enough to neutralise their effect on cosine similarity — they have to be removed from the vector space completely. Second, credentials tried by only one IP (singletons) are also dropped, since they cannot link any two IPs and only weaken the vectors of the IPs that carry them.
+Before computing IDF, two types of credential are removed from the vocabulary. First, credentials used by more than 10% of all IPs are treated as stopwords and dropped entirely. These are so common that sharing them tells you nothing about botnet membership, and because of how L2 normalisation works, IDF alone is not enough to neutralise their effect on cosine similarity ,they have to be removed from the vector space completely. Second, credentials tried by only one IP (singletons) are also dropped, since they cannot link any two IPs and only weaken the vectors of the IPs that carry them.
 
 After filtering, cosine similarity between the TF-IDF vectors is used as the edge weight in a graph — two IPs get an edge if their cosine similarity is at least 0.10. Leiden community detection then finds groups of densely connected IPs, which correspond to probable botnets.
 
@@ -77,7 +77,7 @@ After removing those three stopwords and 15,325 singletons, 25,146 credential pa
 
 ### How results changed across versions
 
-Each version of the script improved on the last. V1 used raw shared-pair counts and produced three artificial mega-clusters because one credential appeared in 56% of all IPs. V2 added IDF weighting to down-weight common credentials, which helped but did not fully solve the problem. V3 switched to cosine similarity and Leiden community detection. V4 (this version) removes the problematic stopword credentials from the vocabulary entirely before computing anything, which is the correct fix.
+Each version of the script improved on the last. V1 used raw shared-pair counts and produced three artificial mega-clusters because one credential appeared in 56% of all IPs. V2 added IDF weighting to down-weight common credentials, which helped but did not fully solve the problem. V3 switched to cosine similarity and Leiden community detection. V4 (current) removes the problematic stopword credentials from the vocabulary entirely before computing anything.
 
 | Metric | V1 | V2 | V3 | V4 |
 |---|---|---|---|---|
