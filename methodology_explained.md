@@ -1,20 +1,20 @@
-# Understanding the Botnet Clustering — From V1 to V2 and Beyond
+# Understanding the Botnet Clustering 
 
 **What this document is:**
-A plain-language explanation of every decision we made, every version we tried, what worked, what did not, and what the correct approach looks like.
+A plain-language explanation of every decision  made, every version tried, what worked, what did not, and what the correct approach looks like.
 
 **The goal:**
 Find groups of attackers who are **working together** — i.e., find the **botnets**.
 
 ---
 
-## Part 1 — The Problem We Are Solving
+## Part 1 — The Problem 
 
-**What is a botnet, in one sentence?**
+**What is a botnet**
 A botnet is a group of computers (bots) all **running the same attack software**, controlled by the same person or group. They all try the same usernames and passwords because they all share the same list.
 
-**How does our honeypot help?**
-Our SSH honeypot sits on port 22 and records every login attempt:
+**How does the honeypot help?**
+The SSH honeypot sits on port 22 and records every login attempt:
 
 ```
 IP_5   tried:  root / 123456
@@ -24,24 +24,24 @@ IP_23  tried:  admin / admin
 IP_23  tried:  root / password
 ```
 
-Because IP_5 and IP_23 both tried `root/123456` AND `admin/admin`, they are probably running the same attack tool — probably **the same botnet**.
+Because IP_5 and IP_23 both tried `root/123456` AND `admin/admin`, they are probably running the same attack tool , probably **the same botnet**.
 
 **The key insight:**
 **If two IPs try the same unusual password combination, they are almost certainly part of the same botnet.**
 
-The word **unusual** matters a lot — and it is exactly where V1 fails and V2 improves.
+The word **unusual** matters a lot ,and it is exactly where V1 fails and V2 improves.
 
 ---
 
-## Part 2 — Version 1: What We Did and Why It Wasn't Enough
+## Part 2 — Version 1
 
 **The idea behind V1:**
-We built a **graph**:
+ **graph**:
 - Every attacker IP = a dot (node)
 - Two IPs that share a credential pair = connected by a line (edge)
 - The **weight** on the line = how many pairs they share
 
-Then we ran the **Louvain algorithm** to find tightly-connected groups of dots. Each group = one probable botnet.
+The **Louvain algorithm** was then run to find tightly-connected groups of dots. Each group = one probable botnet.
 
 **V1 in plain English:**
 "The more passwords two IPs have in common, the more similar they are."
@@ -67,7 +67,7 @@ V1 treated **all credentials equally**. The credential `345gs5662d34 / 345gs5662
 
 **The threshold experiment:**
 
-We tested what happens when we require IPs to share more than 1 pair to be connected:
+Testing different minimum shared pair requirements shows what happens when the edge threshold is raised:
 
 | Min shared pairs | Edges | Communities | Largest cluster | Singletons |
 |---|---|---|---|---|
@@ -78,7 +78,7 @@ We tested what happens when we require IPs to share more than 1 pair to be conne
 | **20** | 11,858 | 3,003 | 203 | 2,976 |
 | **50** | 422 | 4,913 | 29 | 4,892 |
 
-**There is no stable sweet spot.** Every threshold gives a radically different answer. This told us the problem was not the threshold — it was the weighting itself. Common credentials need to be down-weighted, not blocked by a hard cut-off.
+**There is no stable sweet spot.** Every threshold gives a radically different answer. This indicated that the problem was not the threshold — it was the weighting itself. Common credentials need to be down-weighted, not blocked by a hard cut-off.
 
 ---
 
@@ -92,7 +92,7 @@ The logic:
 - A word that appears in every document ("the", "and") tells you nothing about which documents are similar — give it a **low weight**
 - A word that appears in only 3 documents — if two documents share it, that is very meaningful — give it a **high weight**
 
-We applied this to credentials:
+This approach is applied to credentials:
 - **"Document"** = an attacker IP address
 - **"Word"** = a (username, password) pair
 - **IDF score** = how rare is this credential across all IPs?
@@ -182,7 +182,7 @@ Louvain now correctly puts A and B in the same community (strong link), while A-
 
 159 IPs shared no credential pairs with anyone else. They get their own single-node communities in the results.
 
-**We kept them in all output files** (`cluster_results.csv`) but excluded them from the graph image (they would just be 159 floating dots with no meaning).
+**Singletons are retained in all output files** (`cluster_results.csv`) but excluded from the graph image (they would just be 159 floating dots with no meaning).
 
 These IPs could be:
 - Very small botnets that only hit our honeypot once or twice
@@ -190,7 +190,7 @@ These IPs could be:
 - Bots using freshly generated, per-machine unique wordlists (some advanced operators do this specifically to defeat clustering)
 - Other honeypots checking if our honeypot is responsive
 
-**We cannot determine which botnet they belong to from this data alone.** More honeypots, or more data from this one over a longer period, would likely reveal that many singletons share credentials with each other.
+**It is not possible to determine which botnet they belong to from this data alone.** More honeypots, or more data from this one over a longer period, would likely reveal that many singletons share credentials with each other.
 
 ---
 
@@ -340,9 +340,9 @@ Zero-norm rows get `inv = 0`, so they stay all-zero after normalisation. Their c
 - Cluster dissolves when we raise the edge weight threshold
 - Cluster contains IPs with wildly different secondary credentials
 
-**The 3 clusters we are most confident about (both V1 and V2 agree):**
+**The 3 clusters with the highest confidence (both V1 and V2 agree):**
 
-| Cluster | Why we trust it |
+| Cluster | Basis for confidence |
 |---|---|
 | **SIP scanner** (24 IPs) | All 24 IPs send identical 7-line SIP protocol messages. Tight, clean, unmistakable. |
 | **Perl tool** (7 IPs) | All 7 IPs try exactly one pair: `perl/warning`. Only 7 IPs in 4,973 ever tried it. Maximum IDF. |
