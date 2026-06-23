@@ -52,25 +52,25 @@ N  = 4,973   (total unique IPs)
 df = number of IPs that tried this pair
 ```
 
-| Credential pair | IPs | IDF | Signal strength |
-|---|---|---|---|
-| `345gs5662d34/345gs5662d34` | 2,791 | 0.578 | Very low |
-| `root/3245gs5662d34` | 1,658 | 1.098 | Low |
-| `root/@qwer2025` | 799 | 1.828 | Low–medium |
-| `admin/admin` | 452 | 2.398 | Medium |
-| `root/root` | 272 | 2.906 | Medium |
-| `root/debian` | 184 | 3.298 | Medium–high |
-| `root/123456` | 131 | 3.634 | Medium–high |
-| `OPTIONS sip:.../Via: SIP/2.0/...` | ~24 | ~5.3 | High |
-| `perl/warning` | 7 | 6.563 | High |
-| `eth/ethereum12345` | 3 | 7.413 | Very high |
-| Any pair used by exactly 1 IP | 1 | 8.512 | Maximum |
+| Credential pair | IPs | IDF | Signal strength | V4 status |
+|---|---|---|---|---|
+| `345gs5662d34/345gs5662d34` | 2,791 | 0.578 | Very low | Stopword — removed |
+| `root/3245gs5662d34` | 1,658 | 1.098 | Low | Stopword — removed |
+| `root/@qwer2025` | 799 | 1.828 | Low–medium | Stopword — removed |
+| `admin/admin` | 452 | 2.398 | Medium | Kept (minimum IDF) |
+| `root/root` | 272 | 2.906 | Medium | Kept |
+| `root/debian` | 184 | 3.298 | Medium–high | Kept |
+| `root/123456` | 131 | 3.634 | Medium–high | Kept |
+| `OPTIONS sip:.../Via: SIP/2.0/...` | ~24 | ~5.3 | High | Kept |
+| `perl/warning` | 7 | 6.563 | High | Kept |
+| `eth/ethereum12345` | 3 | 7.413 | Very high | Kept |
+| Any pair used by exactly 1 IP | 1 | 8.512 | Maximum | Singleton — removed |
 
 `MIN_COSINE_SIM = 0.10`: two IPs need at least roughly 10% normalised credential overlap to form an edge. Because cosine similarity is normalised by vector length, this threshold is stable regardless of how many credentials an IP tried.
 
 **V4 vocabulary filter.** Before IDF is computed, two classes of credential are removed:
 
-- **Stopwords** (`df > 0.10 × N = 497`): `345gs5662d34/345gs5662d34` (df=2,791) and `root/3245gs5662d34` (df=1,658) are both dropped. These rows in the table above are stopwords in V4.
+- **Stopwords** (`df > 0.10 × N = 497`): `345gs5662d34/345gs5662d34` (df=2,791), `root/3245gs5662d34` (df=1,658), and `root/@qwer2025` (df=799) are all dropped. These three rows in the table above are stopwords in V4.
 - **Singletons** (`df < 2`): credentials only one IP ever tried are also dropped.
 
 After filtering, the minimum IDF in the retained vocabulary rises to approximately 2.3 (credentials at the 10% cutoff), eliminating the near-zero-IDF stopwords from all similarity calculations.
@@ -103,33 +103,34 @@ No stable threshold exists — IDF weighting is the correct fix.
 | Vocabulary filter | None | None | None | Stopwords + singletons removed |
 | Community algorithm | Louvain | Louvain | Leiden | Leiden (plain modularity) |
 | Threshold | min shared pairs | IDF sum >= 1.0 | cosine sim >= 0.10 | cosine sim >= 0.10 |
-| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs | TBD (expected: low hundreds) |
-| Clusters >= 10 IPs | 6 | 13 | 9 | TBD |
-| Clusters >= 2 IPs | 21 | 29 | 31 | TBD |
+| Largest cluster | 1,974 IPs | 856 IPs | 3,329 IPs | 3,367 IPs |
+| Clusters >= 10 IPs | 6 | 13 | 9 | 10 |
+| Clusters >= 2 IPs | 21 | 29 | 31 | 29 |
 | Artificial mega-clusters | 3 | 0 | 0 | 0 (canary filtered from vocabulary) |
-| Singletons | 159 | 159 | 224 | TBD (expected: higher than V3) |
-| Total communities | 179 | 188 | 255 | TBD |
+| Singletons | 159 | 159 | 224 | 186 |
+| Total communities | 179 | 188 | 255 | 215 |
 
-### Cluster Distribution
+### Cluster Distribution (V4)
 
 | Size | Count | Identity |
 |---|---|---|
-| 3,329 | 1 | Canary botnet (root/3245gs5662d34) |
+| 3,367 | 1 | Canary-adjacent botnet (ubuntu/3245gs5662d34) |
 | 393 | 1 | Admin/Admin botnet |
-| 377 | 1 | root/root botnet |
-| 196 | 1 | Debian-targeting botnet |
-| 162 | 1 | Unknown (signature: root/------fuck------) |
-| 160 | 1 | HTTP/Go scanner |
-| 32 | 1 | jakob/jakob cluster |
+| 379 | 1 | root/root botnet |
+| 197 | 1 | Debian-targeting botnet |
+| 161 | 1 | Unknown (signature: root/------fuck------) |
+| 135 | 1 | HTTP/Chrome-UA scanner |
+| 34 | 1 | root/Abcd1234 cluster |
+| 25 | 1 | Go-http-client scanner |
 | 24 | 1 | SIP/VoIP scanner |
 | 17 | 1 | Raspberry Pi scanner (pi/raspberryraspberry993311) |
 | 8 | 1 | TLS binary probe |
 | 7 | 1 | Perl exploit tool |
-| 5 | 1 | a/a cluster |
+| 7 | 1 | a/a cluster |
 | 3 | 1 | Ethereum miner |
-| 2 | 18 | Small pairs (crypto-miners, misc) |
-| 1 | 224 | Singletons |
-| **Total** | **255** | |
+| 2 | 15 | Small pairs (crypto-miners, misc) |
+| 1 | 186 | Singletons |
+| **Total** | **215** | |
 
 ### Graph
 
@@ -141,8 +142,8 @@ No stable threshold exists — IDF weighting is the correct fix.
 
 ## 4. Cluster Analysis
 
-**Community 0 — Canary Botnet (3,329 IPs)**
-Signature: `root/3245gs5662d34`. The largest cluster. V3's cosine similarity metric merges the nine sub-clusters that V2 separated — all share the canary credential `345gs5662d34/345gs5662d34` as the dominant signal, and after L2 normalisation the secondary credential differences that drove V2's splitting are insufficient to produce distinct communities at `MIN_COSINE_SIM = 0.10`. The canary string is a deliberate operator fingerprint inserted to identify their bots in honeypot logs. Scale and technique indicate a professional threat actor.
+**Community 0 — Canary-Adjacent Botnet (3,367 IPs)**
+Signature: `ubuntu/3245gs5662d34`. The largest cluster. In V4, the two most common canary credentials (`345gs5662d34/345gs5662d34` and `root/3245gs5662d34`) are removed as stopwords; the community is now identified by `ubuntu/3245gs5662d34`, a less frequent variant that survived filtering. The cluster is slightly larger than V3's 3,329 IPs, indicating the stopword removal did not fragment this botnet — the remaining canary-family credentials are still sufficient to hold the group together. The canary string is a deliberate operator fingerprint inserted to identify their bots in honeypot logs. Scale and technique indicate a professional threat actor.
 
 ---
 
@@ -161,8 +162,11 @@ Signature: `root/debian`. Targets Debian-based Linux servers with default root c
 
 ---
 
-**Community 5 — HTTP/Go Scanner (160 IPs)**
-Signature: HTTP headers (`User-Agent: Mozilla/5.0`, `Accept: */*`) sent as SSH credentials. Not an SSH brute-force tool — a Go-based multi-protocol scanner probing port 22 for misconfigured HTTP servers or Redis instances.
+**Communities 5 & 7 — HTTP/Go Scanner (135 + 25 IPs)**
+In V4 the V3 single HTTP/Go scanner community (160 IPs) splits into two distinct groups. Community 5 (135 IPs) uses a full Chrome-like User-Agent (`Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/537.36`), while Community 7 (25 IPs) uses the bare `User-Agent: Go-http-client/1.1` header. Both send HTTP headers as SSH credentials — not brute-force tools, but Go-based multi-protocol scanners probing port 22 for misconfigured HTTP servers or Redis instances. The stopword removal revealed that a common credential previously masked the difference between these two tool variants.
+
+**Community 6 — root/Abcd1234 Cluster (34 IPs)**
+Signature: `root/Abcd1234`. A cluster that emerges clearly in V4 after stopword removal. Targets Linux servers with a common "strong-looking but actually guessable" password pattern (capitalised word + digits + punctuation). Consistent with credential-stuffing tools using leaked-password dictionaries.
 
 ---
 
@@ -234,7 +238,7 @@ Crypto-miner usernames (`xmr`, `bitcoin`, `eth`, `wallet`) and miscellaneous pai
 
 | File | Description |
 |---|---|
-| `cluster_attackers.py` | Analysis script (V3, cosine similarity + Leiden) |
+| `cluster_attackers.py` | Analysis script (V4, cosine similarity + Leiden + stopword removal) |
 | `cluster_results.csv` | Every IP with community ID, cluster size, signature credential |
 | `attacker_graph.png` | Graph visualisation (600-node sample) |
 | `cowrie_ip_username_pass_anon.csv` | Raw honeypot data |
@@ -274,7 +278,7 @@ With $N = 4{,}973$, `MAX_DF_FRACTION = 0.10`, `MIN_DF = 2`:
 | Upper bound | $df_p \leq 497$ | Credentials used by >10% of IPs (stopwords) |
 | Lower bound | $df_p \geq 2$ | Credentials only one IP ever tried (singletons) |
 
-**Stopwords** ($df_p > 497$) are credentials so common across the dataset that sharing them carries no discriminating signal. In information retrieval, words like "the" or "and" that appear in every document are removed from the index for exactly this reason. Here, `345gs5662d34/345gs5662d34` (df=2,791) and `root/3245gs5662d34` (df=1,658) are the primary stopwords.
+**Stopwords** ($df_p > 497$) are credentials so common across the dataset that sharing them carries no discriminating signal. In information retrieval, words like "the" or "and" that appear in every document are removed from the index for exactly this reason. Three stopwords were identified: `345gs5662d34/345gs5662d34` (df=2,791), `root/3245gs5662d34` (df=1,658), and `root/@qwer2025` (df=799).
 
 **Singletons** ($df_p = 1$) appear in exactly one IP's vector. Their inner product with any other IP's vector is necessarily zero — they cannot contribute to any edge. They inflate the L2 norm of the single IP that tried them, weakening that IP's cosine similarity with its genuine botnet peers. Removing them makes the remaining vector directions more informative.
 
@@ -456,7 +460,7 @@ The key change from V3 to V4 is vocabulary filtering. Everything else — cosine
 | Vocabulary | All 40,474 credential pairs | Pairs with $2 \leq df \leq 497$ only |
 | Stopwords | Retained (IDF=0.578, partial influence via norm) | Removed — zero dimensions in all vectors |
 | Singletons | Retained (inflate norms, no edge contribution) | Removed |
-| IDF minimum | 0.578 (canary pair) | ~2.30 (pairs at 10% cutoff) |
+| IDF minimum | 0.578 (canary pair) | 2.398 (admin/admin, pairs at 10% cutoff) |
 | Canary effect | Cosine partially re-inflated after L2 normalisation | Zero — canary has no dimension in any vector |
 | IPs with all-zero rows | Cannot occur (every IP tried something) | Possible (IPs whose credentials are all stopwords or singletons) |
 | Zero-row handling | Divide-by-one fallback | Safe divide: inv=0 keeps row zero |
