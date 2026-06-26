@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Understanding the Botnet Clustering 
 
 **What this document is:**
@@ -684,3 +685,222 @@ Signature:       Most-shared pair in cluster (IDF tiebreak)
 | Clusters ≥ 2 IPs | 29 |
 | Singletons | 186 |
 
+=======
+# Understanding the Botnet Clustering
+
+**What this document is:** A plain-language walkthrough of every design decision — what was tried, what worked, and why.
+
+**Goal:** Find groups of attackers working together (botnets).
+
+---
+
+## Part 1 — The Problem
+
+**What is a botnet?**
+A group of computers all running the same attack software, controlled by the same operator. They share the same credential list, so they all try the same usernames and passwords.
+
+**How does the honeypot help?**
+The SSH honeypot records every login attempt:
+```
+IP_5   tried:  root / 123456
+IP_5   tried:  admin / admin
+IP_23  tried:  root / 123456
+IP_23  tried:  admin / admin
+```
+IP_5 and IP_23 tried the same two pairs — they're probably the same botnet.
+
+**Key insight:** Two IPs trying the same *unusual* credential pair are almost certainly the same botnet. The word *unusual* matters — it's exactly where V1 fails.
+
+---
+
+## Part 2 — Version 1
+
+**Idea:** Build a graph where IPs are nodes and edge weight = number of shared credential pairs. Run Louvain community detection.
+
+**What V1 produced:**
+
+| Cluster | Size | Top credential |
+|---|---|---|
+| Mega-botnet A | 1,974 IPs | `345gs5662d34/345gs5662d34` |
+| Mega-botnet B | 1,294 IPs | `root/123456` |
+| Mega-botnet C | 1,282 IPs | `345gs5662d34/345gs5662d34` |
+| HTTP scanner | 160 IPs | HTTP headers |
+| SIP scanner | 24 IPs | SIP messages |
+| + 175 tiny clusters | — | various |
+
+Three clusters contained **91% of all 4,973 IPs** — clearly wrong.
+
+**Why:** `345gs5662d34/345gs5662d34` was used by 2,791 IPs (56%). V1 treated this the same as any rare pair, so one common credential glued half the dataset together.
+
+**Raising the threshold doesn't fix it:**
+
+| Min shared pairs | Communities | Largest | Singletons |
+|---|---|---|---|
+| 1 | 179 | 1,973 | 159 |
+| 2 | 979 | 1,308 | 961 |
+| 5 | 1,823 | 310 | 1,796 |
+| 10 | 2,370 | 329 | 2,343 |
+| 50 | 4,913 | 29 | 4,892 |
+
+No stable answer exists at any threshold. The problem is the weighting itself — common credentials need to be down-weighted, not blocked by a hard cutoff.
+
+---
+
+## Part 3 — Version 2: TF-IDF
+
+**The fix borrowed from text search:** weight credentials by rarity.
+
+```
+IDF(credential) = log( total IPs / IPs that tried this credential )
+```
+
+| Credential | IPs | IDF | Signal |
+|---|---|---|---|
+| `345gs5662d34/345gs5662d34` | 2,791 | 0.578 | Nearly useless |
+| `admin/admin` | 452 | 2.398 | Moderate |
+| `perl/warning` | 7 | 6.563 | Very strong |
+| Unique pair | 1 | 8.512 | Max (but no partner to compare with) |
+
+Edge weight = sum of IDF scores for all shared credentials.
+
+**Example:**
+```
+IP_A + IP_B share: root/123456 (IDF=3.6) and perl/warning (IDF=6.6)
+IP_A + IP_C share: root/123456 (IDF=3.6) only
+
+V1:  A-B = 2,  A-C = 1
+V2:  A-B = 10.2,  A-C = 3.6
+```
+Louvain now correctly groups A with B (strong link), not A with C (weak link).
+
+**V1 vs V2:**
+
+| Metric | V1 | V2 |
+|---|---|---|
+| Largest cluster | 1,974 | 856 |
+| Clusters ≥ 10 IPs | 6 | 13 |
+| Total communities | 179 | 188 |
+
+The three mega-clusters broke into sub-botnets. But two problems remained:
+
+1. **Louvain can produce internally disconnected communities** (a known mathematical flaw, fixed in Leiden).
+2. **Sum-of-IDF is biased by credential list size** — an IP that tried 10,000 pairs gets high edge weights with almost everyone, not because it's similar, but because it tried more things.
+
+---
+
+## Part 4 — Singletons
+
+159 IPs shared no credential pairs with anyone after filtering. They become single-node communities.
+
+These could be small botnets that only hit the honeypot once, manual testers, bots using unique per-machine wordlists to defeat clustering, or other honeypots. They cannot be assigned to any botnet from this data alone — more sensors or a longer observation window would reveal which of them share credentials with each other.
+
+Singletons are included in `cluster_results.csv` but excluded from the graph image.
+
+---
+
+## Part 5 — Version 3
+
+**Fix 1 — Cosine Similarity (replaces sum-of-IDF)**
+
+Each IP becomes a TF-IDF vector (one dimension per credential pair, value = IDF of that pair). Edge weight = cosine of the angle between vectors:
+
+```
+cos_sim(IP_a, IP_b) = (vector_a · vector_b) / (|vector_a| × |vector_b|)
+
+0.0 = completely different credential sets
+1.0 = identical credential sets
+```
+
+Dividing by both lengths removes volume bias — a bot with 10,000 attempts and one with 50 are compared on the same scale.
+
+**Fix 2 — Leiden Algorithm (replaces Louvain)**
+
+Leiden adds a refinement phase that checks internal connectivity before collapsing each community into a super-node. Any disconnected subsets are split off before they can cause problems. Louvain lacks this check, which is why it can produce communities where some members have no path to each other.
+
+**V3 results:** 255 communities, largest: 3,329 IPs (canary botnet). The V2 canary sub-clusters merged back into one, because at cosine ≥ 0.10, their secondary credential differences weren't enough to prevent edges after L2 normalisation.
+
+---
+
+## Part 5.5 — Version 4
+
+**The remaining problem after V3:** a 3,329-IP canary cluster was still appearing. Cosine similarity didn't fully solve it.
+
+**Why — L2 normalisation re-inflates near-universal credentials:**
+
+When you normalise a vector, you divide every dimension by the vector's total length. For an IP that tried *only* the canary pair, the canary becomes that IP's entire identity after normalisation:
+
+```
+IP_A: [canary=0.578]               → normalised: [1.000]
+IP_B: [canary=0.578, rare=6.563]   → normalised: [0.088, 0.996]
+
+cos(A, B) = 0.088  — just under the 0.10 threshold
+```
+
+If A and B share any additional common credential, the cosine rises above 0.10 and an edge forms — even though A's only notable activity was the canary. The fix: remove the canary from the vocabulary entirely. Once the dimension doesn't exist, it can't appear in any calculation.
+
+**The V4 filter:**
+
+```
+df > 0.10 × N (= 497)   →  stopword,  REMOVE
+df < 2                   →  singleton, REMOVE
+2 ≤ df ≤ 497            →  KEEP, compute IDF = log(N / df)
+```
+
+Three stopwords removed: `345gs5662d34/345gs5662d34` (56%), `root/3245gs5662d34` (33%), `root/@qwer2025` (16%). After filtering, minimum IDF rises to ~2.30 — every retained pair has at least moderate discriminating power.
+
+IPs whose credentials are all filtered become all-zero vectors. They form no edges and become singleton communities — correct, since we have no evidence to assign them to any specific botnet.
+
+**V3 → V4 summary:**
+
+| Aspect | V3 | V4 |
+|---|---|---|
+| Vocabulary | All 40,474 pairs | Pairs with 2 ≤ df ≤ 497 |
+| IDF minimum | 0.578 | ~2.30 |
+| Zero-vector IPs | Cannot occur | Become singletons |
+| Leiden variant | RBConfigurationVertexPartition | ModularityVertexPartition |
+| Signature method | Highest IDF-sum pair | Most-shared kept pair, IDF tiebreak |
+
+---
+
+## Part 6 — What Good Results Look Like
+
+**Signs of a real botnet cluster:**
+- Multiple IPs sharing several *rare* credential pairs
+- A clear signature: one pair shared by nearly all members, rare outside the cluster
+- Stable membership across different random seeds
+
+**Signs of a false cluster:**
+- Very large size with no rare signature credential
+- The signature pair is used by >10% of all IPs (too common to be meaningful)
+- Cluster dissolves when the threshold is raised slightly
+
+**Highest-confidence clusters (all versions agree):**
+
+| Cluster | Basis |
+|---|---|
+| SIP scanner (24 IPs) | All 24 IPs send identical 7-line SIP messages — unmistakable fingerprint |
+| Perl tool (7 IPs) | All 7 IPs try exactly `perl/warning`; IDF = 6.563; maximum confidence |
+| TLS probe (8 IPs) | All 8 IPs send raw binary TLS bytes; not human-generated |
+
+These three would survive even the strictest thresholds because their shared credentials are so rare (IDF > 5.0) that there is no ambiguity about membership.
+
+---
+
+## Summary
+
+```
+V1 — Equal weights     → 3 giant fake clusters (largest: 1,974 IPs)
+     Problem: common credentials glue everyone together
+
+V2 — TF-IDF weights   → better separation (13 clusters ≥ 10 IPs, largest: 856)
+     Problems: volume bias; Louvain can disconnect communities
+
+V3 — Cosine + Leiden  → volume bias eliminated, 255 communities, largest: 3,329
+     Problem: L2 normalisation re-inflates near-universal credentials
+
+V4 — Stopword removal → canary absent from all vectors, 215 communities
+     Every retained pair has IDF ≥ 2.30; no stopword can form an edge
+```
+
+For full mathematical derivations (TF-IDF vectors, cosine similarity, sparse matrix computation, modularity, Leiden algorithm), see [clustering_report.md § 9](clustering_report.md).
+>>>>>>> 443a385 (Modified readme)
